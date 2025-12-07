@@ -3,12 +3,13 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 import hashlib
 import hmac
+import pytz
 
-# Try importing calculator (we'll handle errors gracefully)
+# Try importing calculator
 try:
     from gex_calculator import EnhancedGEXDEXCalculator, calculate_dual_gex_dex_flow, detect_gamma_flip_zones
     CALCULATOR_AVAILABLE = True
@@ -17,22 +18,20 @@ except Exception as e:
     IMPORT_ERROR = str(e)
 
 # ============================================================================
-# AUTHENTICATION FUNCTIONS (Built-in)
+# AUTHENTICATION FUNCTIONS
 # ============================================================================
 
 def check_password():
     """Returns True if user has entered correct password"""
     
     def password_entered():
-        """Checks whether a password entered by user is correct"""
         username = st.session_state["username"].strip().lower()
         password = st.session_state["password"]
         
-        # Hardcoded users (you can change these)
         users = {
             "demo": "demo123",
             "premium": "premium123",
-            "niyas": "nyztrade123"  # Add your own username/password
+            "niyas": "nyztrade123"
         }
         
         if username in users and password == users[username]:
@@ -44,7 +43,6 @@ def check_password():
         st.session_state["password_correct"] = False
         st.session_state["authenticated_user"] = None
     
-    # First run
     if "password_correct" not in st.session_state:
         st.markdown("## 🔐 NYZTrade Dashboard Login")
         st.markdown("---")
@@ -67,7 +65,6 @@ def check_password():
         
         return False
     
-    # Password incorrect
     elif not st.session_state["password_correct"]:
         st.markdown("## 🔐 NYZTrade Dashboard Login")
         st.markdown("---")
@@ -82,20 +79,21 @@ def check_password():
         
         return False
     
-    # Password correct
     return True
 
 def get_user_tier():
-    """Get user tier"""
     if "authenticated_user" not in st.session_state:
         return "guest"
     
     username = st.session_state["authenticated_user"]
-    
-    # Premium users list
     premium_users = ["premium", "niyas"]
     
     return "premium" if username in premium_users else "basic"
+
+def get_ist_time():
+    """Get current time in IST"""
+    ist = pytz.timezone('Asia/Kolkata')
+    return datetime.now(ist)
 
 # ============================================================================
 # PAGE CONFIGURATION
@@ -108,10 +106,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ============================================================================
-# CHECK AUTHENTICATION
-# ============================================================================
-
+# Check auth
 if not check_password():
     st.stop()
 
@@ -141,6 +136,15 @@ st.markdown("""
         border-left: 5px solid #ffc107;
         padding: 1rem;
         margin: 1rem 0;
+    }
+    .countdown-timer {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 0.5rem 1rem;
+        border-radius: 8px;
+        text-align: center;
+        font-size: 1.2rem;
+        font-weight: bold;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -190,7 +194,7 @@ expiry_index = st.sidebar.selectbox(
     index=0
 )
 
-# Auto-refresh (Premium feature)
+# Auto-refresh
 st.sidebar.markdown("---")
 st.sidebar.subheader("🔄 Auto-Refresh")
 
@@ -204,6 +208,15 @@ if user_tier == "premium":
             value=60,
             step=30
         )
+        
+        if 'countdown_start' not in st.session_state:
+            st.session_state.countdown_start = time.time()
+        
+        elapsed = time.time() - st.session_state.countdown_start
+        remaining = max(0, refresh_interval - int(elapsed))
+        
+        countdown_placeholder = st.sidebar.empty()
+        countdown_placeholder.markdown(f'<div class="countdown-timer">⏱️ Next refresh: {remaining}s</div>', unsafe_allow_html=True)
 else:
     st.sidebar.info("🔒 Auto-refresh: Premium only")
     auto_refresh = False
@@ -212,6 +225,8 @@ else:
 # Manual refresh
 if st.sidebar.button("🔄 Refresh Now", use_container_width=True):
     st.cache_data.clear()
+    if 'countdown_start' in st.session_state:
+        st.session_state.countdown_start = time.time()
     st.rerun()
 
 # ============================================================================
@@ -220,7 +235,6 @@ if st.sidebar.button("🔄 Refresh Now", use_container_width=True):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_data(symbol, strikes_range, expiry_index):
-    """Fetch and calculate GEX/DEX data"""
     if not CALCULATOR_AVAILABLE:
         return None, None, None, None, f"Calculator not available: {IMPORT_ERROR}"
     
@@ -241,7 +255,6 @@ def fetch_data(symbol, strikes_range, expiry_index):
 
 st.markdown("---")
 
-# Fetch data
 with st.spinner(f"🔄 Fetching live {symbol} data..."):
     df, futures_ltp, fetch_method, atm_info, error = fetch_data(symbol, strikes_range, expiry_index)
 
@@ -249,9 +262,9 @@ if error:
     st.error(f"❌ Error: {error}")
     st.info("""
     **Troubleshooting:**
-    1. Make sure `gex_calculator.py` is uploaded to GitHub
-    2. Check that `requirements.txt` includes: `streamlit pandas numpy plotly scipy requests`
-    3. Wait 1-2 minutes for Streamlit to install dependencies
+    1. Make sure gex_calculator.py is uploaded
+    2. Check requirements.txt includes: streamlit pandas numpy plotly scipy requests pytz
+    3. Wait 1-2 minutes for dependencies
     """)
     st.stop()
 
@@ -284,11 +297,11 @@ with col3:
     st.metric("Put GEX", f"{put_gex:.4f}B")
 
 with col4:
-    st.metric("Futures LTP", f"₹{futures_ltp:,.2f}")
+    st.metric("Futures LTP", f"Rs {futures_ltp:,.2f}")
 
 with col5:
     if atm_info:
-        st.metric("ATM Straddle", f"₹{atm_info['atm_straddle_premium']:.2f}")
+        st.metric("ATM Straddle", f"Rs {atm_info['atm_straddle_premium']:.2f}")
 
 # ============================================================================
 # FLOW METRICS
@@ -336,9 +349,9 @@ except:
 
 st.markdown("---")
 
-tab1, tab2, tab3, tab4 = st.tabs(["📊 GEX Profile", "📈 DEX Profile", "📋 Data Table", "💡 Strategies"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 GEX Profile", "📈 DEX Profile", "🎯 Hedging Pressure", "📋 Data Table", "💡 Strategies"])
 
-# GEX Chart
+# TAB 1: GEX Profile
 with tab1:
     st.subheader(f"NYZTrade - {symbol} Gamma Exposure Profile")
     
@@ -355,7 +368,6 @@ with tab1:
         hovertemplate='<b>Strike:</b> %{y}<br><b>Net GEX:</b> %{x:.4f}B<extra></extra>'
     ))
     
-    # Add gamma flip zones
     if gamma_flip_zones:
         max_gex = df['Net_GEX_B'].abs().max()
         for zone in gamma_flip_zones:
@@ -389,15 +401,14 @@ with tab1:
     
     st.plotly_chart(fig, use_container_width=True)
     
-    # Interpretation
     if total_gex > 0.5:
-        st.success("🟢 **Strong Positive GEX**: Market expected to be sideways to bullish. Consider selling premium strategies.")
+        st.success("🟢 **Strong Positive GEX**: Sideways to bullish market expected")
     elif total_gex < -0.5:
-        st.error("🔴 **Negative GEX**: High volatility expected. Consider buying volatility strategies.")
+        st.error("🔴 **Negative GEX**: High volatility expected")
     else:
-        st.warning("⚖️ **Neutral GEX**: Mixed signals. Follow DEX for direction.")
+        st.warning("⚖️ **Neutral GEX**: Mixed signals")
 
-# DEX Chart
+# TAB 2: DEX Profile
 with tab2:
     st.subheader(f"NYZTrade - {symbol} Delta Exposure Profile")
     
@@ -430,72 +441,218 @@ with tab2:
     
     st.plotly_chart(fig2, use_container_width=True)
 
-# Data Table
+# TAB 3: Hedging Pressure
 with tab3:
+    st.subheader(f"NYZTrade - {symbol} Hedging Pressure Index")
+    
+    fig3 = go.Figure()
+    
+    fig3.add_trace(go.Bar(
+        y=df['Strike'],
+        x=df['Hedging_Pressure'],
+        orientation='h',
+        marker=dict(
+            color=df['Hedging_Pressure'],
+            colorscale='RdYlGn',
+            showscale=True,
+            colorbar=dict(title="Pressure", x=1.15)
+        ),
+        name='Hedging Pressure',
+        hovertemplate='<b>Strike:</b> %{y}<br><b>Pressure:</b> %{x:.2f}%<extra></extra>'
+    ))
+    
+    max_pressure = df['Hedging_Pressure'].abs().max()
+    max_vol = df['Total_Volume'].max()
+    
+    if max_vol > 0:
+        vol_scale = (max_pressure * 0.3) / max_vol
+        scaled_volume = df['Total_Volume'] * vol_scale
+        
+        fig3.add_trace(go.Scatter(
+            y=df['Strike'],
+            x=scaled_volume,
+            mode='lines+markers',
+            line=dict(color='cyan', width=2),
+            marker=dict(size=4),
+            name='Volume',
+            hovertemplate='<b>Strike:</b> %{y}<br><b>Volume:</b> %{customdata:,.0f}<extra></extra>',
+            customdata=df['Total_Volume']
+        ))
+    
+    fig3.add_hline(
+        y=futures_ltp,
+        line_dash="dash",
+        line_color="blue",
+        line_width=3
+    )
+    
+    fig3.update_layout(
+        height=600,
+        xaxis_title="Hedging Pressure (%)",
+        yaxis_title="Strike Price",
+        template='plotly_white'
+    )
+    
+    st.plotly_chart(fig3, use_container_width=True)
+    
+    st.info("💡 **Hedging Pressure**: +100% = Max support | -100% = High volatility zone")
+
+# TAB 4: Data Table
+with tab4:
     st.subheader("Strike-wise Analysis")
     
-    display_cols = ['Strike', 'Call_OI', 'Put_OI', 'Net_GEX_B', 'Net_DEX_B', 'Total_Volume']
+    display_cols = ['Strike', 'Call_OI', 'Put_OI', 'Net_GEX_B', 'Net_DEX_B', 'Hedging_Pressure', 'Total_Volume']
     display_df = df[display_cols].copy()
     
     for col in ['Call_OI', 'Put_OI', 'Total_Volume']:
         if col in display_df.columns:
             display_df[col] = display_df[col].apply(lambda x: f"{int(x):,}")
     
+    if 'Hedging_Pressure' in display_df.columns:
+        display_df['Hedging_Pressure'] = display_df['Hedging_Pressure'].apply(lambda x: f"{x:.2f}%")
+    
     st.dataframe(display_df, use_container_width=True, height=400)
     
-    # Download
     csv = df.to_csv(index=False)
     st.download_button(
         label="📥 Download CSV",
         data=csv,
-        file_name=f"NYZTrade_{symbol}_GEX_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        file_name=f"NYZTrade_{symbol}_{get_ist_time().strftime('%Y%m%d_%H%M')}.csv",
         mime="text/csv",
         use_container_width=True
     )
 
-# Strategies
-with tab4:
+# TAB 5: Strategies
+with tab5:
     st.subheader("💡 Trading Strategies")
     
-    if flow_metrics:
+    if flow_metrics and atm_info:
         gex_bias_val = flow_metrics['gex_near_total']
+        dex_bias_val = flow_metrics['dex_near_total']
         
+        st.markdown("### 📊 Current Market Setup")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("GEX Flow", f"{gex_bias_val:.2f}")
+            st.metric("DEX Flow", f"{dex_bias_val:.2f}")
+        with col2:
+            st.metric("ATM Strike", f"{atm_info['atm_strike']}")
+            st.metric("Straddle Premium", f"Rs {atm_info['atm_straddle_premium']:.2f}")
+        
+        st.markdown("---")
+        
+        # Strong Positive GEX
         if gex_bias_val > 50:
-            st.success("### 🦅 Iron Condor Strategy")
-            st.write("**Rationale**: Strong positive GEX indicates sideways market")
-            st.code(f"Sell {symbol} {int(futures_ltp)} CE/PE + Buy wings")
+            st.success("### 🟢 Strong Positive GEX - Sideways/Bullish")
             
+            st.markdown("#### Strategy 1: Iron Condor")
+            st.text(f"""
+Sell {symbol} {int(futures_ltp)} CE
+Buy  {symbol} {int(futures_ltp + 200)} CE
+Sell {symbol} {int(futures_ltp)} PE
+Buy  {symbol} {int(futures_ltp - 200)} PE
+
+Max Profit: Premium collected
+Risk: MODERATE
+Best: Price stays {int(futures_ltp - 100)} to {int(futures_ltp + 100)}
+            """)
+            
+            st.markdown("#### Strategy 2: Short Straddle")
+            st.text(f"""
+Sell {symbol} {atm_info['atm_strike']} CE + PE
+
+Premium: Rs {atm_info['atm_straddle_premium']:.2f}
+Risk: HIGH - Use stops
+Exit if price moves Rs {atm_info['atm_straddle_premium']*0.5:.2f}
+            """)
+        
+        # Negative GEX
         elif gex_bias_val < -50:
-            st.error("### 🎭 Long Straddle Strategy")
-            st.write("**Rationale**: Negative GEX indicates high volatility")
-            if atm_info:
-                st.code(f"Buy {symbol} {atm_info['atm_strike']} Straddle (₹{atm_info['atm_straddle_premium']:.2f})")
+            st.error("### 🔴 Negative GEX - High Volatility")
+            
+            st.markdown("#### Strategy: Long Straddle")
+            st.text(f"""
+Buy {symbol} {atm_info['atm_strike']} CE + PE
+
+Cost: Rs {atm_info['atm_straddle_premium']:.2f}
+Upper BE: {atm_info['atm_strike'] + atm_info['atm_straddle_premium']:.0f}
+Lower BE: {atm_info['atm_strike'] - atm_info['atm_straddle_premium']:.0f}
+Risk: HIGH - Needs big move
+            """)
+        
+        # Neutral
         else:
-            st.info("### ⏸️ Wait for Clarity")
-            st.write("Mixed signals - stay cautious")
+            st.warning("### ⚖️ Neutral/Mixed Signals")
+            
+            if dex_bias_val > 20:
+                st.markdown("#### Bull Call Spread")
+                st.text(f"""
+Buy  {symbol} {int(futures_ltp)} CE
+Sell {symbol} {int(futures_ltp + 100)} CE
+Risk: MODERATE
+                """)
+            elif dex_bias_val < -20:
+                st.markdown("#### Bear Put Spread")
+                st.text(f"""
+Buy  {symbol} {int(futures_ltp)} PE
+Sell {symbol} {int(futures_ltp - 100)} PE
+Risk: MODERATE
+                """)
+            else:
+                st.info("⏸️ **Wait for Clarity** - Mixed signals, stay cautious")
+        
+        st.markdown("---")
+        st.markdown("### ⚠️ Risk Rules")
+        st.markdown("""
+1. Max 2% capital per trade
+2. Always use stops
+3. Monitor theta decay
+4. Take profit at 50-70% max
+5. Avoid tight stops near gamma flip zones
+        """)
+        
+        if user_tier != "premium":
+            st.info("🔒 Premium: Backtested parameters coming soon")
     
-    if user_tier != "premium":
-        st.info("🔒 Detailed strategies available in Premium")
+    else:
+        st.warning("Metrics unavailable")
 
 # ============================================================================
 # FOOTER
 # ============================================================================
 
 st.markdown("---")
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
+
+ist_time = get_ist_time()
 
 with col1:
-    st.info(f"⏰ {datetime.now().strftime('%H:%M:%S')}")
+    st.info(f"⏰ {ist_time.strftime('%H:%M:%S')} IST")
 
 with col2:
-    st.info(f"📊 {symbol}")
+    st.info(f"📅 {ist_time.strftime('%d %b %Y')}")
 
 with col3:
-    st.info(f"🔧 {fetch_method}")
+    st.info(f"📊 {symbol}")
 
-st.markdown("**💡 Subscribe to NYZTrade on YouTube!**")
+with col4:
+    if gamma_flip_zones:
+        st.warning(f"⚡ {len(gamma_flip_zones)} Flip(s)")
+    else:
+        st.success("✅ No Flips")
 
-# Auto-refresh
+st.markdown(f"**💡 NYZTrade YouTube | Data: {fetch_method}**")
+
+# ============================================================================
+# AUTO-REFRESH
+# ============================================================================
+
 if auto_refresh and user_tier == "premium":
-    time.sleep(refresh_interval)
-    st.rerun()
+    elapsed = time.time() - st.session_state.countdown_start
+    if elapsed >= refresh_interval:
+        st.session_state.countdown_start = time.time()
+        st.rerun()
+    else:
+        time.sleep(1)
+        st.rerun()
