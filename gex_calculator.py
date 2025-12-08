@@ -84,6 +84,24 @@ class EnhancedGEXDEXCalculator:
             'Cache-Control': 'no-cache',
         })
     
+    def _get_empty_dataframe(self):
+        """Return empty DataFrame with all required columns"""
+        columns = [
+            'Strike', 'Call_OI', 'Put_OI', 'Call_OI_Change', 'Put_OI_Change',
+            'Call_Volume', 'Put_Volume', 'Call_IV', 'Put_IV', 'Call_LTP', 'Put_LTP',
+            'Call_Gamma', 'Put_Gamma', 'Call_Delta', 'Put_Delta',
+            'Call_GEX', 'Put_GEX', 'Net_GEX',
+            'Call_DEX', 'Put_DEX', 'Net_DEX',
+            'Call_Flow_GEX', 'Put_Flow_GEX', 'Net_Flow_GEX',
+            'Call_Flow_DEX', 'Put_Flow_DEX', 'Net_Flow_DEX',
+            'Call_GEX_B', 'Put_GEX_B', 'Net_GEX_B',
+            'Call_DEX_B', 'Put_DEX_B', 'Net_DEX_B',
+            'Call_Flow_GEX_B', 'Put_Flow_GEX_B', 'Net_Flow_GEX_B',
+            'Call_Flow_DEX_B', 'Put_Flow_DEX_B', 'Net_Flow_DEX_B',
+            'Total_Volume', 'Hedging_Pressure'
+        ]
+        return pd.DataFrame(columns=columns)
+    
     def _initialize_session(self):
         """Initialize NSE session with proper cookie acquisition"""
         try:
@@ -146,7 +164,7 @@ class EnhancedGEXDEXCalculator:
                 session_ok = self._initialize_session()
                 
                 if not session_ok:
-                    last_error = "Session initialization failed"
+                    last_error = "Session initialization failed - NSE may be blocking access"
                     time.sleep(3)
                     continue
                 
@@ -164,17 +182,17 @@ class EnhancedGEXDEXCalculator:
                 )
                 
                 if response.status_code == 401:
-                    last_error = "Unauthorized - session expired"
+                    last_error = "Unauthorized (401) - Session expired"
                     time.sleep(3)
                     continue
                     
                 if response.status_code == 403:
-                    last_error = "Forbidden - possible rate limit or IP block"
+                    last_error = "Forbidden (403) - IP may be blocked by NSE. Try during market hours or use VPN"
                     time.sleep(5)
                     continue
                 
                 if response.status_code != 200:
-                    last_error = f"HTTP {response.status_code}"
+                    last_error = f"HTTP {response.status_code} - NSE API returned error"
                     time.sleep(3)
                     continue
                 
@@ -182,32 +200,30 @@ class EnhancedGEXDEXCalculator:
                 try:
                     data = response.json()
                 except json.JSONDecodeError as e:
-                    last_error = f"Invalid JSON response: {str(e)}"
+                    last_error = f"Invalid JSON response from NSE API"
                     time.sleep(3)
                     continue
                 
                 # Validate response structure
                 if 'records' not in data:
-                    last_error = f"Response missing 'records' key. Keys: {list(data.keys())}"
-                    
-                    # Check if it's an error response
                     if 'error' in data:
-                        last_error = f"API Error: {data.get('error')}"
-                    
+                        last_error = f"NSE API Error: {data.get('error')}"
+                    else:
+                        last_error = f"Invalid API response - missing 'records'. This may be due to market hours or access restrictions"
                     time.sleep(3)
                     continue
                 
                 records = data['records']
                 
                 if not isinstance(records, dict):
-                    last_error = f"'records' is not a dict: {type(records)}"
+                    last_error = f"Invalid data format from NSE API"
                     time.sleep(3)
                     continue
                 
                 # Extract data
                 spot_price = records.get('underlyingValue')
                 if not spot_price:
-                    last_error = "Missing underlyingValue"
+                    last_error = "No market data available - check if market is open"
                     time.sleep(3)
                     continue
                 
@@ -247,7 +263,7 @@ class EnhancedGEXDEXCalculator:
                 
                 option_data = records.get('data', [])
                 if not option_data:
-                    last_error = "No option data in records"
+                    last_error = "No option chain data available"
                     time.sleep(3)
                     continue
                 
@@ -405,13 +421,16 @@ class EnhancedGEXDEXCalculator:
                     wait_time = (attempt + 1) * 3
                     time.sleep(wait_time)
         
-        # If all retries failed, return None values (NOT raising exception)
-        # This prevents the unpacking error
-        print(f"All attempts failed. Last error: {last_error}")
+        # If all retries failed, return empty DataFrame with all columns
+        empty_df = self._get_empty_dataframe()
+        default_atm_info = {
+            'atm_strike': 0,
+            'atm_call_premium': 0,
+            'atm_put_premium': 0,
+            'atm_straddle_premium': 0
+        }
         
-        # Return empty/default values instead of None
-        empty_df = pd.DataFrame()
-        return empty_df, 0, f"Error: {last_error}", {}
+        return empty_df, 0, f"Error: {last_error}", default_atm_info
 
 # ============================================================================
 # FLOW METRICS CALCULATION
@@ -419,8 +438,9 @@ class EnhancedGEXDEXCalculator:
 
 def calculate_dual_gex_dex_flow(df, futures_ltp):
     """Calculate GEX/DEX flow metrics"""
-    if df is None or len(df) == 0:
-        # Return default values instead of raising error
+    # Check if DataFrame is empty or invalid
+    if df is None or len(df) == 0 or 'Net_GEX_B' not in df.columns:
+        # Return default values
         return {
             'gex_near_positive': 0.0,
             'gex_near_negative': 0.0,
@@ -451,12 +471,14 @@ def calculate_dual_gex_dex_flow(df, futures_ltp):
     
     # GEX Flow
     positive_gex_df = df_unique[df_unique['Net_GEX_B'] > 0].copy()
-    positive_gex_df['Distance'] = abs(positive_gex_df['Strike'] - futures_ltp)
-    positive_gex_df = positive_gex_df.sort_values('Distance').head(5)
+    if len(positive_gex_df) > 0:
+        positive_gex_df['Distance'] = abs(positive_gex_df['Strike'] - futures_ltp)
+        positive_gex_df = positive_gex_df.sort_values('Distance').head(5)
     
     negative_gex_df = df_unique[df_unique['Net_GEX_B'] < 0].copy()
-    negative_gex_df['Distance'] = abs(negative_gex_df['Strike'] - futures_ltp)
-    negative_gex_df = negative_gex_df.sort_values('Distance').head(5)
+    if len(negative_gex_df) > 0:
+        negative_gex_df['Distance'] = abs(negative_gex_df['Strike'] - futures_ltp)
+        negative_gex_df = negative_gex_df.sort_values('Distance').head(5)
     
     gex_near_positive = float(positive_gex_df['Net_GEX_B'].sum()) if len(positive_gex_df) > 0 else 0.0
     gex_near_negative = float(negative_gex_df['Net_GEX_B'].sum()) if len(negative_gex_df) > 0 else 0.0
@@ -549,7 +571,7 @@ def calculate_dual_gex_dex_flow(df, futures_ltp):
 
 def detect_gamma_flip_zones(df):
     """Detect gamma flip zones"""
-    if df is None or len(df) == 0:
+    if df is None or len(df) == 0 or 'Net_GEX_B' not in df.columns:
         return []
     
     gamma_flip_zones = []
