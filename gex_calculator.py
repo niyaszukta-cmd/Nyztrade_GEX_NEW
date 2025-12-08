@@ -88,7 +88,6 @@ class EnhancedGEXDEXCalculator:
         """Initialize NSE session with proper cookie acquisition"""
         try:
             # Step 1: Visit homepage to get initial cookies
-            print("Initializing NSE session...")
             home_response = self.session.get(
                 self.base_url,
                 timeout=10,
@@ -96,7 +95,6 @@ class EnhancedGEXDEXCalculator:
             )
             
             if home_response.status_code != 200:
-                print(f"Homepage returned status: {home_response.status_code}")
                 return False
             
             time.sleep(1)
@@ -110,23 +108,19 @@ class EnhancedGEXDEXCalculator:
             )
             
             if oc_response.status_code != 200:
-                print(f"Option chain page returned status: {oc_response.status_code}")
                 return False
             
             time.sleep(1)
             
             # Step 3: Check if we have necessary cookies
             cookies = self.session.cookies.get_dict()
-            print(f"Cookies acquired: {len(cookies)} cookies")
             
             if len(cookies) == 0:
-                print("Warning: No cookies received")
                 return False
             
             return True
             
         except Exception as e:
-            print(f"Session initialization error: {e}")
             return False
     
     def calculate_time_to_expiry(self, expiry_date_str):
@@ -143,24 +137,21 @@ class EnhancedGEXDEXCalculator:
     def fetch_and_calculate_gex_dex(self, symbol="NIFTY", strikes_range=10, expiry_index=0):
         """Fetch option chain and calculate GEX/DEX - Streamlit optimized"""
         max_retries = 3
+        last_error = None
         
         for attempt in range(max_retries):
             try:
-                print(f"\nAttempt {attempt + 1}/{max_retries}")
-                
                 # Initialize/reinitialize session
-                if attempt == 0 or attempt > 0:
-                    self._create_session()
-                    session_ok = self._initialize_session()
-                    
-                    if not session_ok:
-                        print("Session initialization failed, retrying...")
-                        time.sleep(3)
-                        continue
+                self._create_session()
+                session_ok = self._initialize_session()
+                
+                if not session_ok:
+                    last_error = "Session initialization failed"
+                    time.sleep(3)
+                    continue
                 
                 # Build URL
                 url = f"{self.option_chain_url}?symbol={symbol}"
-                print(f"Fetching: {url}")
                 
                 # Make API request with proper referer
                 response = self.session.get(
@@ -172,20 +163,18 @@ class EnhancedGEXDEXCalculator:
                     }
                 )
                 
-                print(f"Response status: {response.status_code}")
-                
                 if response.status_code == 401:
-                    print("Unauthorized - session expired")
+                    last_error = "Unauthorized - session expired"
                     time.sleep(3)
                     continue
                     
                 if response.status_code == 403:
-                    print("Forbidden - possible rate limit or IP block")
+                    last_error = "Forbidden - possible rate limit or IP block"
                     time.sleep(5)
                     continue
                 
                 if response.status_code != 200:
-                    print(f"HTTP {response.status_code}: {response.text[:200]}")
+                    last_error = f"HTTP {response.status_code}"
                     time.sleep(3)
                     continue
                 
@@ -193,21 +182,17 @@ class EnhancedGEXDEXCalculator:
                 try:
                     data = response.json()
                 except json.JSONDecodeError as e:
-                    print(f"Invalid JSON response: {str(e)}")
-                    print(f"Response text: {response.text[:500]}")
+                    last_error = f"Invalid JSON response: {str(e)}"
                     time.sleep(3)
                     continue
                 
                 # Validate response structure
-                print(f"Response keys: {list(data.keys())}")
-                
                 if 'records' not in data:
-                    print(f"ERROR: Response missing 'records' key")
-                    print(f"Full response: {json.dumps(data, indent=2)[:1000]}")
+                    last_error = f"Response missing 'records' key. Keys: {list(data.keys())}"
                     
                     # Check if it's an error response
                     if 'error' in data:
-                        print(f"API Error: {data.get('error')}")
+                        last_error = f"API Error: {data.get('error')}"
                     
                     time.sleep(3)
                     continue
@@ -215,26 +200,25 @@ class EnhancedGEXDEXCalculator:
                 records = data['records']
                 
                 if not isinstance(records, dict):
-                    print(f"'records' is not a dict: {type(records)}")
+                    last_error = f"'records' is not a dict: {type(records)}"
                     time.sleep(3)
                     continue
                 
                 # Extract data
                 spot_price = records.get('underlyingValue')
                 if not spot_price:
-                    print("Missing underlyingValue")
-                    print(f"Records keys: {list(records.keys())}")
+                    last_error = "Missing underlyingValue"
                     time.sleep(3)
                     continue
                 
                 expiry_dates = records.get('expiryDates', [])
                 if not expiry_dates:
-                    raise Exception("No expiry dates available")
+                    last_error = "No expiry dates available"
+                    time.sleep(3)
+                    continue
                 
                 selected_expiry = expiry_dates[expiry_index] if expiry_index < len(expiry_dates) else expiry_dates[0]
                 time_to_expiry, days_to_expiry = self.calculate_time_to_expiry(selected_expiry)
-                
-                print(f"Spot: {spot_price}, Expiry: {selected_expiry}, Days: {days_to_expiry}")
                 
                 # Get futures price
                 futures_ltp = spot_price * 1.002
@@ -263,9 +247,9 @@ class EnhancedGEXDEXCalculator:
                 
                 option_data = records.get('data', [])
                 if not option_data:
-                    raise Exception("No option data in records")
-                
-                print(f"Processing {len(option_data)} option records...")
+                    last_error = "No option data in records"
+                    time.sleep(3)
+                    continue
                 
                 for item in option_data:
                     if not isinstance(item, dict):
@@ -374,9 +358,9 @@ class EnhancedGEXDEXCalculator:
                     })
                 
                 if not all_strikes:
-                    raise Exception(f"No strikes found within range {strikes_range}")
-                
-                print(f"Processed {len(all_strikes)} strikes successfully")
+                    last_error = f"No strikes found within range {strikes_range}"
+                    time.sleep(3)
+                    continue
                 
                 df = pd.DataFrame(all_strikes)
                 df = df.sort_values('Strike').reset_index(drop=True)
@@ -412,17 +396,22 @@ class EnhancedGEXDEXCalculator:
                     'atm_straddle_premium': atm_straddle_premium
                 }
                 
-                print("✓ GEX/DEX calculation completed successfully")
+                # SUCCESS - return data
                 return df, futures_ltp, "NSE Live", atm_info
                 
             except Exception as e:
-                print(f"Attempt {attempt + 1} failed: {str(e)}")
+                last_error = str(e)
                 if attempt < max_retries - 1:
                     wait_time = (attempt + 1) * 3
-                    print(f"Waiting {wait_time}s before retry...")
                     time.sleep(wait_time)
-                else:
-                    raise Exception(f"Failed after {max_retries} attempts: {str(e)}")
+        
+        # If all retries failed, return None values (NOT raising exception)
+        # This prevents the unpacking error
+        print(f"All attempts failed. Last error: {last_error}")
+        
+        # Return empty/default values instead of None
+        empty_df = pd.DataFrame()
+        return empty_df, 0, f"Error: {last_error}", {}
 
 # ============================================================================
 # FLOW METRICS CALCULATION
@@ -431,7 +420,32 @@ class EnhancedGEXDEXCalculator:
 def calculate_dual_gex_dex_flow(df, futures_ltp):
     """Calculate GEX/DEX flow metrics"""
     if df is None or len(df) == 0:
-        raise ValueError("Empty dataframe provided")
+        # Return default values instead of raising error
+        return {
+            'gex_near_positive': 0.0,
+            'gex_near_negative': 0.0,
+            'gex_near_total': 0.0,
+            'gex_near_bias': "NO DATA",
+            'gex_near_color': "gray",
+            'gex_total_positive': 0.0,
+            'gex_total_negative': 0.0,
+            'gex_total_all': 0.0,
+            'gex_total_bias': "NO DATA",
+            'gex_total_color': "gray",
+            'dex_near_positive': 0.0,
+            'dex_near_negative': 0.0,
+            'dex_near_total': 0.0,
+            'dex_near_bias': "NO DATA",
+            'dex_near_color': "gray",
+            'dex_total_positive': 0.0,
+            'dex_total_negative': 0.0,
+            'dex_total_all': 0.0,
+            'dex_total_bias': "NO DATA",
+            'dex_total_color': "gray",
+            'combined_signal': 0.0,
+            'combined_bias': "NO DATA",
+            'combined_color': "gray",
+        }
     
     df_unique = df.drop_duplicates(subset=['Strike']).sort_values('Strike').reset_index(drop=True)
     
