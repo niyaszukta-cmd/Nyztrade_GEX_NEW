@@ -5,6 +5,7 @@ from scipy.stats import norm
 from datetime import datetime
 import warnings
 import time
+import json
 warnings.filterwarnings('ignore')
 
 # ============================================================================
@@ -60,36 +61,73 @@ class EnhancedGEXDEXCalculator:
     """Advanced GEX + DEX calculations optimized for Streamlit"""
     
     def __init__(self):
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'application/json',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Referer': 'https://www.nseindia.com/',
-        }
-        self.session = requests.Session()
-        self.session.headers.update(self.headers)
+        self.session = None
         self.base_url = "https://www.nseindia.com"
         self.option_chain_url = "https://www.nseindia.com/api/option-chain-indices"
         self.risk_free_rate = 0.07
         self.bs_calc = BlackScholesCalculator()
+        self._create_session()
+    
+    def _create_session(self):
+        """Create a new session with proper headers"""
+        self.session = requests.Session()
         
-        # Initialize session with retry
-        self._initialize_session()
+        # Enhanced headers to mimic real browser
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'DNT': '1',
+            'Pragma': 'no-cache',
+            'Cache-Control': 'no-cache',
+        })
     
     def _initialize_session(self):
-        """Initialize NSE session with proper cookies"""
+        """Initialize NSE session with proper cookie acquisition"""
         try:
-            # First request to get cookies
-            self.session.get(self.base_url, timeout=10)
-            time.sleep(1)  # Small delay for session establishment
+            # Step 1: Visit homepage to get initial cookies
+            print("Initializing NSE session...")
+            home_response = self.session.get(
+                self.base_url,
+                timeout=10,
+                headers={'Referer': self.base_url}
+            )
             
-            # Second request to ensure session is active
-            self.session.get("https://www.nseindia.com/get-quotes/equity?symbol=SBIN", timeout=10)
-            time.sleep(0.5)
+            if home_response.status_code != 200:
+                print(f"Homepage returned status: {home_response.status_code}")
+                return False
+            
+            time.sleep(1)
+            
+            # Step 2: Visit option chain page to establish session
+            oc_page_url = f"{self.base_url}/option-chain"
+            oc_response = self.session.get(
+                oc_page_url,
+                timeout=10,
+                headers={'Referer': self.base_url}
+            )
+            
+            if oc_response.status_code != 200:
+                print(f"Option chain page returned status: {oc_response.status_code}")
+                return False
+            
+            time.sleep(1)
+            
+            # Step 3: Check if we have necessary cookies
+            cookies = self.session.cookies.get_dict()
+            print(f"Cookies acquired: {len(cookies)} cookies")
+            
+            if len(cookies) == 0:
+                print("Warning: No cookies received")
+                return False
+            
+            return True
+            
         except Exception as e:
-            print(f"Session initialization warning: {e}")
+            print(f"Session initialization error: {e}")
+            return False
     
     def calculate_time_to_expiry(self, expiry_date_str):
         """Calculate time to expiry from date string"""
@@ -104,253 +142,287 @@ class EnhancedGEXDEXCalculator:
     
     def fetch_and_calculate_gex_dex(self, symbol="NIFTY", strikes_range=10, expiry_index=0):
         """Fetch option chain and calculate GEX/DEX - Streamlit optimized"""
-        try:
-            # Reinitialize session if needed
-            url = f"{self.option_chain_url}?symbol={symbol}"
-            
-            # Try fetching data with retries
-            max_retries = 3
-            response = None
-            
-            for attempt in range(max_retries):
-                try:
-                    response = self.session.get(url, timeout=15)
-                    
-                    if response.status_code == 200:
-                        break
-                    elif response.status_code == 401:
-                        # Unauthorized - reinitialize session
-                        print(f"Session expired (attempt {attempt + 1}/{max_retries}), reinitializing...")
-                        self._initialize_session()
-                        time.sleep(2)
-                    else:
-                        print(f"HTTP {response.status_code} (attempt {attempt + 1}/{max_retries})")
-                        time.sleep(2)
-                        
-                except requests.exceptions.Timeout:
-                    print(f"Timeout (attempt {attempt + 1}/{max_retries})")
-                    time.sleep(2)
-                except requests.exceptions.RequestException as e:
-                    print(f"Request error (attempt {attempt + 1}/{max_retries}): {e}")
-                    time.sleep(2)
-            
-            if not response or response.status_code != 200:
-                raise Exception(f"Failed to fetch data after {max_retries} attempts. Status: {response.status_code if response else 'No response'}")
-            
-            # Parse JSON response
+        max_retries = 3
+        
+        for attempt in range(max_retries):
             try:
-                data = response.json()
-            except ValueError as e:
-                raise Exception(f"Invalid JSON response: {str(e)}")
-            
-            # Validate response structure
-            if not isinstance(data, dict):
-                raise Exception(f"Unexpected response type: {type(data)}")
-            
-            if 'records' not in data:
-                raise Exception(f"Response missing 'records' key. Available keys: {list(data.keys())}")
-            
-            records = data['records']
-            
-            if not isinstance(records, dict):
-                raise Exception(f"'records' is not a dictionary. Type: {type(records)}")
-            
-            # Extract data with validation
-            spot_price = records.get('underlyingValue')
-            if not spot_price:
-                raise Exception("Missing 'underlyingValue' in records")
-            
-            expiry_dates = records.get('expiryDates', [])
-            if not expiry_dates:
-                raise Exception("No expiry dates available")
-            
-            selected_expiry = expiry_dates[expiry_index] if expiry_index < len(expiry_dates) else expiry_dates[0]
-            time_to_expiry, days_to_expiry = self.calculate_time_to_expiry(selected_expiry)
-            
-            # Get futures price (simplified for speed)
-            futures_ltp = spot_price * 1.002  # Approximate
-            
-            # Contract specs
-            if 'BANKNIFTY' in symbol:
-                contract_size = 15
-                strike_interval = 100
-            elif 'FINNIFTY' in symbol:
-                contract_size = 40
-                strike_interval = 50
-            elif 'MIDCPNIFTY' in symbol:
-                contract_size = 75
-                strike_interval = 25
-            else:
-                contract_size = 25
-                strike_interval = 50
-            
-            # Process strikes
-            all_strikes = []
-            processed_strikes = set()
-            atm_strike = None
-            min_atm_diff = float('inf')
-            atm_call_premium = 0
-            atm_put_premium = 0
-            
-            option_data = records.get('data', [])
-            if not option_data:
-                raise Exception("No option data available in records")
-            
-            for item in option_data:
-                if not isinstance(item, dict):
-                    continue
+                print(f"\nAttempt {attempt + 1}/{max_retries}")
                 
-                if selected_expiry and item.get('expiryDate') != selected_expiry:
-                    continue
+                # Initialize/reinitialize session
+                if attempt == 0 or attempt > 0:
+                    self._create_session()
+                    session_ok = self._initialize_session()
+                    
+                    if not session_ok:
+                        print("Session initialization failed, retrying...")
+                        time.sleep(3)
+                        continue
                 
-                strike = item.get('strikePrice', 0)
-                if strike == 0 or strike in processed_strikes:
-                    continue
+                # Build URL
+                url = f"{self.option_chain_url}?symbol={symbol}"
+                print(f"Fetching: {url}")
                 
-                processed_strikes.add(strike)
-                
-                strike_distance = abs(strike - futures_ltp) / strike_interval
-                if strike_distance > strikes_range:
-                    continue
-                
-                ce = item.get('CE', {})
-                pe = item.get('PE', {})
-                
-                # Ensure CE and PE are dictionaries
-                if not isinstance(ce, dict):
-                    ce = {}
-                if not isinstance(pe, dict):
-                    pe = {}
-                
-                call_oi = ce.get('openInterest', 0) or 0
-                put_oi = pe.get('openInterest', 0) or 0
-                call_oi_change = ce.get('changeinOpenInterest', 0) or 0
-                put_oi_change = pe.get('changeinOpenInterest', 0) or 0
-                call_volume = ce.get('totalTradedVolume', 0) or 0
-                put_volume = pe.get('totalTradedVolume', 0) or 0
-                call_iv = ce.get('impliedVolatility', 0) or 0
-                put_iv = pe.get('impliedVolatility', 0) or 0
-                call_ltp = ce.get('lastPrice', 0) or 0
-                put_ltp = pe.get('lastPrice', 0) or 0
-                
-                # Find ATM
-                strike_diff = abs(strike - futures_ltp)
-                if strike_diff < min_atm_diff:
-                    min_atm_diff = strike_diff
-                    atm_strike = strike
-                    atm_call_premium = call_ltp
-                    atm_put_premium = put_ltp
-                
-                call_iv_decimal = call_iv / 100 if call_iv > 0 else 0.15
-                put_iv_decimal = put_iv / 100 if put_iv > 0 else 0.15
-                
-                # Calculate Greeks
-                call_gamma = self.bs_calc.calculate_gamma(
-                    S=futures_ltp, K=strike, T=time_to_expiry,
-                    r=self.risk_free_rate, sigma=call_iv_decimal
+                # Make API request with proper referer
+                response = self.session.get(
+                    url,
+                    timeout=15,
+                    headers={
+                        'Referer': f'{self.base_url}/option-chain',
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
                 )
                 
-                put_gamma = self.bs_calc.calculate_gamma(
-                    S=futures_ltp, K=strike, T=time_to_expiry,
-                    r=self.risk_free_rate, sigma=put_iv_decimal
-                )
+                print(f"Response status: {response.status_code}")
                 
-                call_delta = self.bs_calc.calculate_call_delta(
-                    S=futures_ltp, K=strike, T=time_to_expiry,
-                    r=self.risk_free_rate, sigma=call_iv_decimal
-                )
+                if response.status_code == 401:
+                    print("Unauthorized - session expired")
+                    time.sleep(3)
+                    continue
+                    
+                if response.status_code == 403:
+                    print("Forbidden - possible rate limit or IP block")
+                    time.sleep(5)
+                    continue
                 
-                put_delta = self.bs_calc.calculate_put_delta(
-                    S=futures_ltp, K=strike, T=time_to_expiry,
-                    r=self.risk_free_rate, sigma=put_iv_decimal
-                )
+                if response.status_code != 200:
+                    print(f"HTTP {response.status_code}: {response.text[:200]}")
+                    time.sleep(3)
+                    continue
                 
-                # Calculate GEX/DEX
-                call_gex = (call_oi * call_gamma * futures_ltp * futures_ltp * contract_size) / 1_000_000_000
-                put_gex = -(put_oi * put_gamma * futures_ltp * futures_ltp * contract_size) / 1_000_000_000
+                # Parse response
+                try:
+                    data = response.json()
+                except json.JSONDecodeError as e:
+                    print(f"Invalid JSON response: {str(e)}")
+                    print(f"Response text: {response.text[:500]}")
+                    time.sleep(3)
+                    continue
                 
-                call_dex = (call_oi * call_delta * futures_ltp * contract_size) / 1_000_000_000
-                put_dex = (put_oi * put_delta * futures_ltp * contract_size) / 1_000_000_000
+                # Validate response structure
+                print(f"Response keys: {list(data.keys())}")
                 
-                call_flow_gex = (call_oi_change * call_gamma * futures_ltp * futures_ltp * contract_size) / 1_000_000_000
-                put_flow_gex = -(put_oi_change * put_gamma * futures_ltp * futures_ltp * contract_size) / 1_000_000_000
+                if 'records' not in data:
+                    print(f"ERROR: Response missing 'records' key")
+                    print(f"Full response: {json.dumps(data, indent=2)[:1000]}")
+                    
+                    # Check if it's an error response
+                    if 'error' in data:
+                        print(f"API Error: {data.get('error')}")
+                    
+                    time.sleep(3)
+                    continue
                 
-                call_flow_dex = (call_oi_change * call_delta * futures_ltp * contract_size) / 1_000_000_000
-                put_flow_dex = (put_oi_change * put_delta * futures_ltp * contract_size) / 1_000_000_000
+                records = data['records']
                 
-                all_strikes.append({
-                    'Strike': strike,
-                    'Call_OI': call_oi,
-                    'Put_OI': put_oi,
-                    'Call_OI_Change': call_oi_change,
-                    'Put_OI_Change': put_oi_change,
-                    'Call_Volume': call_volume,
-                    'Put_Volume': put_volume,
-                    'Call_IV': call_iv,
-                    'Put_IV': put_iv,
-                    'Call_LTP': call_ltp,
-                    'Put_LTP': put_ltp,
-                    'Call_Gamma': call_gamma,
-                    'Put_Gamma': put_gamma,
-                    'Call_Delta': call_delta,
-                    'Put_Delta': put_delta,
-                    'Call_GEX': call_gex,
-                    'Put_GEX': put_gex,
-                    'Net_GEX': call_gex + put_gex,
-                    'Call_DEX': call_dex,
-                    'Put_DEX': put_dex,
-                    'Net_DEX': call_dex + put_dex,
-                    'Call_Flow_GEX': call_flow_gex,
-                    'Put_Flow_GEX': put_flow_gex,
-                    'Net_Flow_GEX': call_flow_gex + put_flow_gex,
-                    'Call_Flow_DEX': call_flow_dex,
-                    'Put_Flow_DEX': put_flow_dex,
-                    'Net_Flow_DEX': call_flow_dex + put_flow_dex
-                })
-            
-            if not all_strikes:
-                raise Exception("No strikes data found within specified range")
-            
-            df = pd.DataFrame(all_strikes)
-            df = df.sort_values('Strike').reset_index(drop=True)
-            
-            df['Call_GEX_B'] = df['Call_GEX']
-            df['Put_GEX_B'] = df['Put_GEX']
-            df['Net_GEX_B'] = df['Net_GEX']
-            df['Call_DEX_B'] = df['Call_DEX']
-            df['Put_DEX_B'] = df['Put_DEX']
-            df['Net_DEX_B'] = df['Net_DEX']
-            df['Call_Flow_GEX_B'] = df['Call_Flow_GEX']
-            df['Put_Flow_GEX_B'] = df['Put_Flow_GEX']
-            df['Net_Flow_GEX_B'] = df['Net_Flow_GEX']
-            df['Call_Flow_DEX_B'] = df['Call_Flow_DEX']
-            df['Put_Flow_DEX_B'] = df['Put_Flow_DEX']
-            df['Net_Flow_DEX_B'] = df['Net_Flow_DEX']
-            df['Total_Volume'] = df['Call_Volume'] + df['Put_Volume']
-            
-            # Hedging pressure
-            max_net_gex = df['Net_GEX_B'].abs().max()
-            if max_net_gex > 0:
-                df['Hedging_Pressure'] = (df['Net_GEX_B'] / max_net_gex) * 100
-            else:
-                df['Hedging_Pressure'] = 0
-            
-            # ATM info
-            atm_straddle_premium = atm_call_premium + atm_put_premium
-            
-            atm_info = {
-                'atm_strike': atm_strike,
-                'atm_call_premium': atm_call_premium,
-                'atm_put_premium': atm_put_premium,
-                'atm_straddle_premium': atm_straddle_premium
-            }
-            
-            return df, futures_ltp, "NSE Live", atm_info
-            
-        except Exception as e:
-            error_msg = str(e)
-            print(f"ERROR: {error_msg}")  # For debugging
-            raise Exception(f"GEX calculation error: {error_msg}")
+                if not isinstance(records, dict):
+                    print(f"'records' is not a dict: {type(records)}")
+                    time.sleep(3)
+                    continue
+                
+                # Extract data
+                spot_price = records.get('underlyingValue')
+                if not spot_price:
+                    print("Missing underlyingValue")
+                    print(f"Records keys: {list(records.keys())}")
+                    time.sleep(3)
+                    continue
+                
+                expiry_dates = records.get('expiryDates', [])
+                if not expiry_dates:
+                    raise Exception("No expiry dates available")
+                
+                selected_expiry = expiry_dates[expiry_index] if expiry_index < len(expiry_dates) else expiry_dates[0]
+                time_to_expiry, days_to_expiry = self.calculate_time_to_expiry(selected_expiry)
+                
+                print(f"Spot: {spot_price}, Expiry: {selected_expiry}, Days: {days_to_expiry}")
+                
+                # Get futures price
+                futures_ltp = spot_price * 1.002
+                
+                # Contract specs
+                if 'BANKNIFTY' in symbol:
+                    contract_size = 15
+                    strike_interval = 100
+                elif 'FINNIFTY' in symbol:
+                    contract_size = 40
+                    strike_interval = 50
+                elif 'MIDCPNIFTY' in symbol:
+                    contract_size = 75
+                    strike_interval = 25
+                else:
+                    contract_size = 25
+                    strike_interval = 50
+                
+                # Process strikes
+                all_strikes = []
+                processed_strikes = set()
+                atm_strike = None
+                min_atm_diff = float('inf')
+                atm_call_premium = 0
+                atm_put_premium = 0
+                
+                option_data = records.get('data', [])
+                if not option_data:
+                    raise Exception("No option data in records")
+                
+                print(f"Processing {len(option_data)} option records...")
+                
+                for item in option_data:
+                    if not isinstance(item, dict):
+                        continue
+                    
+                    if selected_expiry and item.get('expiryDate') != selected_expiry:
+                        continue
+                    
+                    strike = item.get('strikePrice', 0)
+                    if strike == 0 or strike in processed_strikes:
+                        continue
+                    
+                    processed_strikes.add(strike)
+                    
+                    strike_distance = abs(strike - futures_ltp) / strike_interval
+                    if strike_distance > strikes_range:
+                        continue
+                    
+                    ce = item.get('CE', {}) or {}
+                    pe = item.get('PE', {}) or {}
+                    
+                    call_oi = ce.get('openInterest', 0) or 0
+                    put_oi = pe.get('openInterest', 0) or 0
+                    call_oi_change = ce.get('changeinOpenInterest', 0) or 0
+                    put_oi_change = pe.get('changeinOpenInterest', 0) or 0
+                    call_volume = ce.get('totalTradedVolume', 0) or 0
+                    put_volume = pe.get('totalTradedVolume', 0) or 0
+                    call_iv = ce.get('impliedVolatility', 0) or 0
+                    put_iv = pe.get('impliedVolatility', 0) or 0
+                    call_ltp = ce.get('lastPrice', 0) or 0
+                    put_ltp = pe.get('lastPrice', 0) or 0
+                    
+                    # Find ATM
+                    strike_diff = abs(strike - futures_ltp)
+                    if strike_diff < min_atm_diff:
+                        min_atm_diff = strike_diff
+                        atm_strike = strike
+                        atm_call_premium = call_ltp
+                        atm_put_premium = put_ltp
+                    
+                    call_iv_decimal = call_iv / 100 if call_iv > 0 else 0.15
+                    put_iv_decimal = put_iv / 100 if put_iv > 0 else 0.15
+                    
+                    # Calculate Greeks
+                    call_gamma = self.bs_calc.calculate_gamma(
+                        S=futures_ltp, K=strike, T=time_to_expiry,
+                        r=self.risk_free_rate, sigma=call_iv_decimal
+                    )
+                    
+                    put_gamma = self.bs_calc.calculate_gamma(
+                        S=futures_ltp, K=strike, T=time_to_expiry,
+                        r=self.risk_free_rate, sigma=put_iv_decimal
+                    )
+                    
+                    call_delta = self.bs_calc.calculate_call_delta(
+                        S=futures_ltp, K=strike, T=time_to_expiry,
+                        r=self.risk_free_rate, sigma=call_iv_decimal
+                    )
+                    
+                    put_delta = self.bs_calc.calculate_put_delta(
+                        S=futures_ltp, K=strike, T=time_to_expiry,
+                        r=self.risk_free_rate, sigma=put_iv_decimal
+                    )
+                    
+                    # Calculate GEX/DEX
+                    call_gex = (call_oi * call_gamma * futures_ltp * futures_ltp * contract_size) / 1_000_000_000
+                    put_gex = -(put_oi * put_gamma * futures_ltp * futures_ltp * contract_size) / 1_000_000_000
+                    
+                    call_dex = (call_oi * call_delta * futures_ltp * contract_size) / 1_000_000_000
+                    put_dex = (put_oi * put_delta * futures_ltp * contract_size) / 1_000_000_000
+                    
+                    call_flow_gex = (call_oi_change * call_gamma * futures_ltp * futures_ltp * contract_size) / 1_000_000_000
+                    put_flow_gex = -(put_oi_change * put_gamma * futures_ltp * futures_ltp * contract_size) / 1_000_000_000
+                    
+                    call_flow_dex = (call_oi_change * call_delta * futures_ltp * contract_size) / 1_000_000_000
+                    put_flow_dex = (put_oi_change * put_delta * futures_ltp * contract_size) / 1_000_000_000
+                    
+                    all_strikes.append({
+                        'Strike': strike,
+                        'Call_OI': call_oi,
+                        'Put_OI': put_oi,
+                        'Call_OI_Change': call_oi_change,
+                        'Put_OI_Change': put_oi_change,
+                        'Call_Volume': call_volume,
+                        'Put_Volume': put_volume,
+                        'Call_IV': call_iv,
+                        'Put_IV': put_iv,
+                        'Call_LTP': call_ltp,
+                        'Put_LTP': put_ltp,
+                        'Call_Gamma': call_gamma,
+                        'Put_Gamma': put_gamma,
+                        'Call_Delta': call_delta,
+                        'Put_Delta': put_delta,
+                        'Call_GEX': call_gex,
+                        'Put_GEX': put_gex,
+                        'Net_GEX': call_gex + put_gex,
+                        'Call_DEX': call_dex,
+                        'Put_DEX': put_dex,
+                        'Net_DEX': call_dex + put_dex,
+                        'Call_Flow_GEX': call_flow_gex,
+                        'Put_Flow_GEX': put_flow_gex,
+                        'Net_Flow_GEX': call_flow_gex + put_flow_gex,
+                        'Call_Flow_DEX': call_flow_dex,
+                        'Put_Flow_DEX': put_flow_dex,
+                        'Net_Flow_DEX': call_flow_dex + put_flow_dex
+                    })
+                
+                if not all_strikes:
+                    raise Exception(f"No strikes found within range {strikes_range}")
+                
+                print(f"Processed {len(all_strikes)} strikes successfully")
+                
+                df = pd.DataFrame(all_strikes)
+                df = df.sort_values('Strike').reset_index(drop=True)
+                
+                df['Call_GEX_B'] = df['Call_GEX']
+                df['Put_GEX_B'] = df['Put_GEX']
+                df['Net_GEX_B'] = df['Net_GEX']
+                df['Call_DEX_B'] = df['Call_DEX']
+                df['Put_DEX_B'] = df['Put_DEX']
+                df['Net_DEX_B'] = df['Net_DEX']
+                df['Call_Flow_GEX_B'] = df['Call_Flow_GEX']
+                df['Put_Flow_GEX_B'] = df['Put_Flow_GEX']
+                df['Net_Flow_GEX_B'] = df['Net_Flow_GEX']
+                df['Call_Flow_DEX_B'] = df['Call_Flow_DEX']
+                df['Put_Flow_DEX_B'] = df['Put_Flow_DEX']
+                df['Net_Flow_DEX_B'] = df['Net_Flow_DEX']
+                df['Total_Volume'] = df['Call_Volume'] + df['Put_Volume']
+                
+                # Hedging pressure
+                max_net_gex = df['Net_GEX_B'].abs().max()
+                if max_net_gex > 0:
+                    df['Hedging_Pressure'] = (df['Net_GEX_B'] / max_net_gex) * 100
+                else:
+                    df['Hedging_Pressure'] = 0
+                
+                # ATM info
+                atm_straddle_premium = atm_call_premium + atm_put_premium
+                
+                atm_info = {
+                    'atm_strike': atm_strike,
+                    'atm_call_premium': atm_call_premium,
+                    'atm_put_premium': atm_put_premium,
+                    'atm_straddle_premium': atm_straddle_premium
+                }
+                
+                print("✓ GEX/DEX calculation completed successfully")
+                return df, futures_ltp, "NSE Live", atm_info
+                
+            except Exception as e:
+                print(f"Attempt {attempt + 1} failed: {str(e)}")
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 3
+                    print(f"Waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
+                else:
+                    raise Exception(f"Failed after {max_retries} attempts: {str(e)}")
 
 # ============================================================================
 # FLOW METRICS CALCULATION
