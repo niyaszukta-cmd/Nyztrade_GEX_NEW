@@ -4,6 +4,7 @@ import numpy as np
 from scipy.stats import norm
 from datetime import datetime
 import warnings
+import time
 warnings.filterwarnings('ignore')
 
 # ============================================================================
@@ -62,6 +63,9 @@ class EnhancedGEXDEXCalculator:
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Accept': 'application/json',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
             'Referer': 'https://www.nseindia.com/',
         }
         self.session = requests.Session()
@@ -71,13 +75,24 @@ class EnhancedGEXDEXCalculator:
         self.risk_free_rate = 0.07
         self.bs_calc = BlackScholesCalculator()
         
-        # Initialize session
+        # Initialize session with retry
+        self._initialize_session()
+    
+    def _initialize_session(self):
+        """Initialize NSE session with proper cookies"""
         try:
+            # First request to get cookies
             self.session.get(self.base_url, timeout=10)
-        except:
-            pass
+            time.sleep(1)  # Small delay for session establishment
+            
+            # Second request to ensure session is active
+            self.session.get("https://www.nseindia.com/get-quotes/equity?symbol=SBIN", timeout=10)
+            time.sleep(0.5)
+        except Exception as e:
+            print(f"Session initialization warning: {e}")
     
     def calculate_time_to_expiry(self, expiry_date_str):
+        """Calculate time to expiry from date string"""
         try:
             expiry_date = datetime.strptime(expiry_date_str, "%d-%b-%Y")
             today = datetime.now()
@@ -90,20 +105,67 @@ class EnhancedGEXDEXCalculator:
     def fetch_and_calculate_gex_dex(self, symbol="NIFTY", strikes_range=10, expiry_index=0):
         """Fetch option chain and calculate GEX/DEX - Streamlit optimized"""
         try:
+            # Reinitialize session if needed
             url = f"{self.option_chain_url}?symbol={symbol}"
-            response = self.session.get(url, timeout=10)
             
-            if response.status_code != 200:
-                raise Exception(f"Failed to fetch data: {response.status_code}")
+            # Try fetching data with retries
+            max_retries = 3
+            response = None
             
-            data = response.json()
+            for attempt in range(max_retries):
+                try:
+                    response = self.session.get(url, timeout=15)
+                    
+                    if response.status_code == 200:
+                        break
+                    elif response.status_code == 401:
+                        # Unauthorized - reinitialize session
+                        print(f"Session expired (attempt {attempt + 1}/{max_retries}), reinitializing...")
+                        self._initialize_session()
+                        time.sleep(2)
+                    else:
+                        print(f"HTTP {response.status_code} (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(2)
+                        
+                except requests.exceptions.Timeout:
+                    print(f"Timeout (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(2)
+                except requests.exceptions.RequestException as e:
+                    print(f"Request error (attempt {attempt + 1}/{max_retries}): {e}")
+                    time.sleep(2)
+            
+            if not response or response.status_code != 200:
+                raise Exception(f"Failed to fetch data after {max_retries} attempts. Status: {response.status_code if response else 'No response'}")
+            
+            # Parse JSON response
+            try:
+                data = response.json()
+            except ValueError as e:
+                raise Exception(f"Invalid JSON response: {str(e)}")
+            
+            # Validate response structure
+            if not isinstance(data, dict):
+                raise Exception(f"Unexpected response type: {type(data)}")
+            
+            if 'records' not in data:
+                raise Exception(f"Response missing 'records' key. Available keys: {list(data.keys())}")
+            
             records = data['records']
             
-            spot_price = records.get('underlyingValue', 0)
-            expiry_dates = records.get('expiryDates', [])
+            if not isinstance(records, dict):
+                raise Exception(f"'records' is not a dictionary. Type: {type(records)}")
             
-            selected_expiry = expiry_dates[expiry_index] if expiry_dates and expiry_index < len(expiry_dates) else None
-            time_to_expiry, days_to_expiry = self.calculate_time_to_expiry(selected_expiry) if selected_expiry else (7/365, 7)
+            # Extract data with validation
+            spot_price = records.get('underlyingValue')
+            if not spot_price:
+                raise Exception("Missing 'underlyingValue' in records")
+            
+            expiry_dates = records.get('expiryDates', [])
+            if not expiry_dates:
+                raise Exception("No expiry dates available")
+            
+            selected_expiry = expiry_dates[expiry_index] if expiry_index < len(expiry_dates) else expiry_dates[0]
+            time_to_expiry, days_to_expiry = self.calculate_time_to_expiry(selected_expiry)
             
             # Get futures price (simplified for speed)
             futures_ltp = spot_price * 1.002  # Approximate
@@ -130,7 +192,14 @@ class EnhancedGEXDEXCalculator:
             atm_call_premium = 0
             atm_put_premium = 0
             
-            for item in records.get('data', []):
+            option_data = records.get('data', [])
+            if not option_data:
+                raise Exception("No option data available in records")
+            
+            for item in option_data:
+                if not isinstance(item, dict):
+                    continue
+                
                 if selected_expiry and item.get('expiryDate') != selected_expiry:
                     continue
                 
@@ -147,16 +216,22 @@ class EnhancedGEXDEXCalculator:
                 ce = item.get('CE', {})
                 pe = item.get('PE', {})
                 
-                call_oi = ce.get('openInterest', 0)
-                put_oi = pe.get('openInterest', 0)
-                call_oi_change = ce.get('changeinOpenInterest', 0)
-                put_oi_change = pe.get('changeinOpenInterest', 0)
-                call_volume = ce.get('totalTradedVolume', 0)
-                put_volume = pe.get('totalTradedVolume', 0)
-                call_iv = ce.get('impliedVolatility', 0)
-                put_iv = pe.get('impliedVolatility', 0)
-                call_ltp = ce.get('lastPrice', 0)
-                put_ltp = pe.get('lastPrice', 0)
+                # Ensure CE and PE are dictionaries
+                if not isinstance(ce, dict):
+                    ce = {}
+                if not isinstance(pe, dict):
+                    pe = {}
+                
+                call_oi = ce.get('openInterest', 0) or 0
+                put_oi = pe.get('openInterest', 0) or 0
+                call_oi_change = ce.get('changeinOpenInterest', 0) or 0
+                put_oi_change = pe.get('changeinOpenInterest', 0) or 0
+                call_volume = ce.get('totalTradedVolume', 0) or 0
+                put_volume = pe.get('totalTradedVolume', 0) or 0
+                call_iv = ce.get('impliedVolatility', 0) or 0
+                put_iv = pe.get('impliedVolatility', 0) or 0
+                call_ltp = ce.get('lastPrice', 0) or 0
+                put_ltp = pe.get('lastPrice', 0) or 0
                 
                 # Find ATM
                 strike_diff = abs(strike - futures_ltp)
@@ -234,7 +309,7 @@ class EnhancedGEXDEXCalculator:
                 })
             
             if not all_strikes:
-                raise Exception("No strikes data found")
+                raise Exception("No strikes data found within specified range")
             
             df = pd.DataFrame(all_strikes)
             df = df.sort_values('Strike').reset_index(drop=True)
@@ -273,7 +348,9 @@ class EnhancedGEXDEXCalculator:
             return df, futures_ltp, "NSE Live", atm_info
             
         except Exception as e:
-            raise Exception(f"GEX calculation error: {str(e)}")
+            error_msg = str(e)
+            print(f"ERROR: {error_msg}")  # For debugging
+            raise Exception(f"GEX calculation error: {error_msg}")
 
 # ============================================================================
 # FLOW METRICS CALCULATION
@@ -281,6 +358,9 @@ class EnhancedGEXDEXCalculator:
 
 def calculate_dual_gex_dex_flow(df, futures_ltp):
     """Calculate GEX/DEX flow metrics"""
+    if df is None or len(df) == 0:
+        raise ValueError("Empty dataframe provided")
+    
     df_unique = df.drop_duplicates(subset=['Strike']).sort_values('Strike').reset_index(drop=True)
     
     # GEX Flow
@@ -383,6 +463,9 @@ def calculate_dual_gex_dex_flow(df, futures_ltp):
 
 def detect_gamma_flip_zones(df):
     """Detect gamma flip zones"""
+    if df is None or len(df) == 0:
+        return []
+    
     gamma_flip_zones = []
     df_sorted = df.sort_values('Strike').reset_index(drop=True)
     
