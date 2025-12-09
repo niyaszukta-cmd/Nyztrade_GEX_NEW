@@ -4,4 +4,4 @@ numpy
 plotly
 scipy
 pytz
-dhanhq
+dhanhq==2.1.0
