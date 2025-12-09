@@ -67,16 +67,78 @@ if st.sidebar.button("🚪 Logout"):
         del st.session_state[key]
     st.rerun()
 
-# GET DHAN CREDENTIALS
-try:
-    DHAN_CLIENT_ID = st.secrets["dhan_client_id"]
-    DHAN_ACCESS_TOKEN = st.secrets["dhan_access_token"]
-    st.sidebar.success(f"✅ DhanHQ: {DHAN_CLIENT_ID[:4]}***")
-except:
-    DHAN_CLIENT_ID = None
-    DHAN_ACCESS_TOKEN = None
-    st.sidebar.error("❌ DhanHQ credentials missing")
+# ============================================================================
+# DEBUG SECRETS - THIS WILL SHOW US WHAT'S WRONG
+# ============================================================================
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔍 Debug Info")
+
+# Show all available secrets keys
+try:
+    all_keys = list(st.secrets.keys())
+    st.sidebar.success(f"✅ Secrets found: {len(all_keys)}")
+    st.sidebar.caption(f"Keys: {all_keys}")
+except Exception as e:
+    st.sidebar.error(f"❌ No secrets: {e}")
+    all_keys = []
+
+# Try to get DhanHQ credentials
+DHAN_CLIENT_ID = None
+DHAN_ACCESS_TOKEN = None
+
+# Method 1: Direct access
+try:
+    if "dhan_client_id" in st.secrets:
+        DHAN_CLIENT_ID = st.secrets["dhan_client_id"]
+        st.sidebar.success(f"✅ Client ID: {DHAN_CLIENT_ID[:4]}***")
+    else:
+        st.sidebar.warning("⚠️ dhan_client_id not in secrets")
+except Exception as e:
+    st.sidebar.error(f"❌ Client ID error: {e}")
+
+try:
+    if "dhan_access_token" in st.secrets:
+        DHAN_ACCESS_TOKEN = st.secrets["dhan_access_token"]
+        st.sidebar.success(f"✅ Access Token: {DHAN_ACCESS_TOKEN[:8]}***")
+    else:
+        st.sidebar.warning("⚠️ dhan_access_token not in secrets")
+except Exception as e:
+    st.sidebar.error(f"❌ Access Token error: {e}")
+
+# Final status
+if DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN:
+    st.sidebar.success("✅ DhanHQ Ready!")
+else:
+    st.sidebar.error("❌ DhanHQ credentials missing")
+    st.error("### ❌ DhanHQ credentials not found in secrets")
+    
+    st.warning("""
+    **How to fix:**
+    
+    1. Click ☰ (menu) → Manage app → Settings → Secrets
+    2. Paste this EXACTLY:
+```
+    [passwords]
+    demo = "demo123"
+    premium = "premium123"
+    premium_users = ["premium", "niyas"]
+    
+    dhan_client_id = "022705a2"
+    dhan_access_token = "a9e88db4-17ae-4e2e-ba26-211ba1b62ccd"
+```
+    
+    3. Click Save
+    4. Wait 2 minutes
+    5. Refresh this page
+    """)
+    st.stop()
+
+# ============================================================================
+# MAIN APP
+# ============================================================================
+
+st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Settings")
 symbol = st.sidebar.selectbox("Index", ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"])
 strikes_range = st.sidebar.slider("Strikes Range", 5, 20, 12)
@@ -91,7 +153,7 @@ def fetch_data(symbol, strikes_range, expiry_index, client_id, access_token):
     if not CALCULATOR_AVAILABLE:
         return None, None, None, None, f"Calculator error: {IMPORT_ERROR}"
     if not client_id or not access_token:
-        return None, None, None, None, "DhanHQ credentials not found in secrets"
+        return None, None, None, None, "DhanHQ credentials not configured"
     
     try:
         calc = EnhancedGEXDEXCalculator(client_id=client_id, access_token=access_token)
@@ -171,4 +233,4 @@ with col2:
 with col3:
     st.success(f"✅ {method}")
 
-st.markdown("**💡 NYZTrade YouTube | Powered by DhanHQ**")
+st.markdown("**💡 NYZTrade YouTube | Powered by DhanHQ v2.1.0**")
