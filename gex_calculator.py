@@ -4,7 +4,6 @@ from scipy.stats import norm
 import requests
 from datetime import datetime, timedelta
 import time
-from fake_useragent import UserAgent
 
 class BlackScholesCalculator:
     @staticmethod
@@ -33,15 +32,19 @@ class EnhancedGEXDEXCalculator:
         self.session = None
     
     def get_session(self):
-        """Create session with rotating user agents"""
+        """Create session with proper headers"""
         if self.session is None:
             self.session = requests.Session()
         
-        try:
-            ua = UserAgent()
-            user_agent = ua.random
-        except:
-            user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+        ]
+        
+        import random
+        user_agent = random.choice(user_agents)
         
         headers = {
             'User-Agent': user_agent,
@@ -62,43 +65,39 @@ class EnhancedGEXDEXCalculator:
         return self.session
     
     def fetch_nse_option_chain(self, symbol="NIFTY", max_retries=5):
-        """Aggressive retry strategy for NSE"""
+        """Fetch with aggressive retry"""
         
         for attempt in range(max_retries):
             try:
                 session = self.get_session()
                 
-                # Step 1: Get homepage (essential for cookies)
+                # Step 1: Homepage
                 session.get('https://www.nseindia.com', timeout=10)
-                time.sleep(1 + attempt * 0.5)  # Progressive delay
+                time.sleep(1 + attempt * 0.5)
                 
-                # Step 2: Get option chain page
+                # Step 2: Option chain page
                 session.get('https://www.nseindia.com/option-chain', timeout=10)
                 time.sleep(1 + attempt * 0.5)
                 
-                # Step 3: Fetch API
+                # Step 3: API call
                 url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
                 response = session.get(url, timeout=15)
                 
                 if response.status_code == 200:
                     data = response.json()
-                    # Validate data structure
                     if 'records' in data and 'data' in data['records']:
                         return data
                     else:
-                        raise Exception("Invalid data structure received")
+                        raise Exception("Invalid data structure")
                 
                 elif response.status_code == 403:
                     if attempt < max_retries - 1:
-                        # Exponential backoff
                         wait_time = (2 ** attempt) + (attempt * 2)
-                        print(f"Attempt {attempt + 1} failed, waiting {wait_time}s...")
                         time.sleep(wait_time)
-                        # Reset session
                         self.session = None
                         continue
                     else:
-                        raise Exception(f"NSE blocked after {max_retries} attempts. Professional solution needed.")
+                        raise Exception(f"NSE blocked after {max_retries} attempts. Try during market hours or use VPN/self-hosting.")
                 
                 else:
                     raise Exception(f"HTTP {response.status_code}")
@@ -106,17 +105,15 @@ class EnhancedGEXDEXCalculator:
             except requests.exceptions.Timeout:
                 if attempt < max_retries - 1:
                     wait_time = 3 + (attempt * 2)
-                    print(f"Timeout, retrying in {wait_time}s...")
                     time.sleep(wait_time)
                     self.session = None
                     continue
                 else:
-                    raise Exception("Connection timeout - NSE may be down or blocking cloud IPs")
+                    raise Exception("Timeout - NSE may be down or blocking cloud IPs")
             
             except Exception as e:
                 if attempt < max_retries - 1:
                     wait_time = 2 + (attempt * 1.5)
-                    print(f"Error: {str(e)}, retrying in {wait_time}s...")
                     time.sleep(wait_time)
                     self.session = None
                     continue
@@ -126,7 +123,7 @@ class EnhancedGEXDEXCalculator:
         raise Exception("All retry attempts exhausted")
     
     def get_futures_ltp_from_multiple_sources(self, symbol="NIFTY"):
-        """Fetch spot price"""
+        """Get spot price from multiple sources"""
         
         # Yahoo Finance
         try:
@@ -169,9 +166,9 @@ class EnhancedGEXDEXCalculator:
         return None, None
     
     def fetch_and_calculate_gex_dex(self, symbol="NIFTY", strikes_range=12, expiry_index=0):
-        """Main calculation - PRODUCTION VERSION (No synthetic data)"""
+        """Main calculation function"""
         
-        # Fetch real data only
+        # Fetch data
         data = self.fetch_nse_option_chain(symbol)
         
         # Get futures price
@@ -182,7 +179,7 @@ class EnhancedGEXDEXCalculator:
                 futures_ltp = float(data['records']['underlyingValue'])
                 fetch_method = "NSE Underlying"
             except:
-                raise Exception("Unable to fetch underlying price from any source")
+                raise Exception("Unable to fetch underlying price")
         
         # Get expiry
         expiry_dates = data['records']['expiryDates']
@@ -239,7 +236,7 @@ class EnhancedGEXDEXCalculator:
         ].copy()
         
         if len(df) == 0:
-            raise Exception("No strikes in selected range")
+            raise Exception("No strikes in range")
         
         # Time to expiry
         expiry_date = datetime.strptime(selected_expiry, '%d-%b-%Y')
@@ -356,8 +353,3 @@ def detect_gamma_flip_zones(df):
             })
     
     return flip_zones
-```
-
-**Add to requirements.txt:**
-```
-fake-useragent
