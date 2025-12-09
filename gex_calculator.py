@@ -3,6 +3,7 @@ import numpy as np
 from scipy.stats import norm
 import requests
 from datetime import datetime, timedelta
+import time
 
 class BlackScholesCalculator:
     """Calculate Greeks using Black-Scholes model"""
@@ -38,24 +39,77 @@ class EnhancedGEXDEXCalculator:
     def __init__(self, risk_free_rate=0.07):
         self.risk_free_rate = risk_free_rate
         self.bs_calc = BlackScholesCalculator()
+        self.session = None
     
-    def fetch_nse_option_chain(self, symbol="NIFTY"):
-        """Fetch option chain from NSE"""
-        url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
+    def create_session(self):
+        """Create a session with proper headers to bypass NSE restrictions"""
+        session = requests.Session()
         
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br'
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
         }
         
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=10)
+        session.headers.update(headers)
         
-        response = session.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
+        # First visit NSE homepage to get cookies
+        try:
+            session.get('https://www.nseindia.com', timeout=10)
+            time.sleep(1)
+            session.get('https://www.nseindia.com/option-chain', timeout=10)
+            time.sleep(1)
+        except:
+            pass
         
-        return response.json()
+        return session
+    
+    def fetch_nse_option_chain(self, symbol="NIFTY", max_retries=3):
+        """Fetch option chain from NSE with retry logic"""
+        
+        for attempt in range(max_retries):
+            try:
+                # Create fresh session for each attempt
+                self.session = self.create_session()
+                
+                url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
+                
+                response = self.session.get(url, timeout=15)
+                
+                if response.status_code == 200:
+                    return response.json()
+                elif response.status_code == 403:
+                    if attempt < max_retries - 1:
+                        time.sleep(2)
+                        continue
+                    else:
+                        raise Exception("NSE API blocked (403). Please try again in a few minutes or use VPN.")
+                else:
+                    raise Exception(f"NSE API returned status code: {response.status_code}")
+                    
+            except requests.exceptions.Timeout:
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                else:
+                    raise Exception("NSE API timeout. Please check your internet connection.")
+            
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                else:
+                    raise Exception(f"Failed to fetch NSE data: {str(e)}")
+        
+        raise Exception("Failed to fetch NSE data after multiple attempts")
     
     def get_futures_ltp_from_groww(self, symbol="NIFTY"):
         """Fetch futures price from Groww.in"""
@@ -70,8 +124,10 @@ class EnhancedGEXDEXCalculator:
             groww_symbol = symbol_map.get(symbol, "nifty-50")
             url = f"https://groww.in/v1/api/charting_service/v2/chart/exchange/NSE/segment/CASH/symbol/{groww_symbol}/latest"
             
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            response = requests.get(url, headers=headers, timeout=5)
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            response = requests.get(url, headers=headers, timeout=10)
             data = response.json()
             
             if 'ltp' in data:
@@ -84,18 +140,23 @@ class EnhancedGEXDEXCalculator:
     def fetch_and_calculate_gex_dex(self, symbol="NIFTY", strikes_range=12, expiry_index=0):
         """Main function to fetch data and calculate GEX/DEX"""
         
-        # Fetch option chain
+        # Fetch option chain with retries
         data = self.fetch_nse_option_chain(symbol)
         
         # Get futures price
         futures_ltp, fetch_method = self.get_futures_ltp_from_groww(symbol)
         
         if futures_ltp is None:
-            # Fallback to ATM strike
-            records = data['records']['data']
-            if records:
-                futures_ltp = records[0].get('strikePrice', 25000)
-                fetch_method = "ATM Strike (Fallback)"
+            # Fallback to underlying value from NSE
+            try:
+                futures_ltp = float(data['records']['underlyingValue'])
+                fetch_method = "NSE Underlying Value"
+            except:
+                # Last resort: use ATM strike
+                records = data['records']['data']
+                if records:
+                    futures_ltp = records[len(records)//2].get('strikePrice', 25000)
+                    fetch_method = "ATM Strike (Fallback)"
         
         # Get expiry dates
         expiry_dates = data['records']['expiryDates']
