@@ -4,11 +4,9 @@ from scipy.stats import norm
 import requests
 from datetime import datetime, timedelta
 import time
-import json
+from fake_useragent import UserAgent
 
 class BlackScholesCalculator:
-    """Calculate Greeks using Black-Scholes model"""
-    
     @staticmethod
     def calculate_gamma(S, K, T, r, sigma):
         if T <= 0 or sigma <= 0:
@@ -29,208 +27,140 @@ class BlackScholesCalculator:
         return delta
 
 class EnhancedGEXDEXCalculator:
-    """Enhanced GEX and DEX calculator with smart fallback"""
-    
     def __init__(self, risk_free_rate=0.07):
         self.risk_free_rate = risk_free_rate
         self.bs_calc = BlackScholesCalculator()
+        self.session = None
     
-    def fetch_via_cors_proxy(self, symbol="NIFTY"):
-        """Use CORS proxy to bypass restrictions"""
-        try:
-            # Method 1: AllOrigins proxy
-            nse_url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-            proxy_url = f"https://api.allorigins.win/raw?url={nse_url}"
-            
-            response = requests.get(proxy_url, timeout=30)
-            
-            if response.status_code == 200:
-                return response.json(), "CORS Proxy"
-        except:
-            pass
+    def get_session(self):
+        """Create session with rotating user agents"""
+        if self.session is None:
+            self.session = requests.Session()
         
         try:
-            # Method 2: CORS Anywhere
-            nse_url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-            proxy_url = f"https://cors-anywhere.herokuapp.com/{nse_url}"
-            
-            headers = {
-                'X-Requested-With': 'XMLHttpRequest',
-                'User-Agent': 'Mozilla/5.0'
-            }
-            
-            response = requests.get(proxy_url, headers=headers, timeout=30)
-            
-            if response.status_code == 200:
-                return response.json(), "CORS Anywhere"
+            ua = UserAgent()
+            user_agent = ua.random
         except:
-            pass
+            user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         
-        raise Exception("CORS proxies failed")
-    
-    def fetch_from_upstox_api(self, symbol="NIFTY"):
-        """Try Upstox market data (free tier)"""
-        try:
-            # Upstox provides index data
-            symbol_map = {
-                "NIFTY": "NSE_INDEX|Nifty 50",
-                "BANKNIFTY": "NSE_INDEX|Nifty Bank",
-                "FINNIFTY": "NSE_INDEX|Nifty Fin Service",
-                "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT"
-            }
-            
-            # Note: This is a placeholder - actual implementation would need Upstox API key
-            # For demo purposes, we'll skip this
-            raise Exception("Upstox requires API key")
-            
-        except:
-            raise Exception("Upstox method not available")
-    
-    def generate_synthetic_data(self, symbol="NIFTY", spot_price=None):
-        """Generate realistic synthetic data when APIs fail (for demo/testing)"""
-        
-        if spot_price is None:
-            # Default prices for each index
-            default_prices = {
-                "NIFTY": 24500,
-                "BANKNIFTY": 52000,
-                "FINNIFTY": 22500,
-                "MIDCPNIFTY": 12000
-            }
-            spot_price = default_prices.get(symbol, 24500)
-        
-        # Generate strikes around spot (±1200 points, 50 point intervals)
-        strikes = np.arange(spot_price - 1200, spot_price + 1300, 50)
-        
-        option_data = []
-        
-        for strike in strikes:
-            # Distance from ATM
-            moneyness = (strike - spot_price) / spot_price
-            
-            # Synthetic OI (higher near ATM)
-            distance_factor = np.exp(-abs(moneyness) * 10)
-            
-            call_oi = int(np.random.uniform(5000, 50000) * distance_factor)
-            put_oi = int(np.random.uniform(5000, 50000) * distance_factor)
-            
-            # Synthetic IV (smile pattern)
-            base_iv = 15 + abs(moneyness) * 50
-            call_iv = base_iv + np.random.uniform(-2, 2)
-            put_iv = base_iv + np.random.uniform(-2, 2)
-            
-            # Synthetic LTP based on intrinsic + time value
-            call_intrinsic = max(spot_price - strike, 0)
-            put_intrinsic = max(strike - spot_price, 0)
-            
-            call_ltp = call_intrinsic + abs(np.random.uniform(10, 100) * distance_factor)
-            put_ltp = put_intrinsic + abs(np.random.uniform(10, 100) * distance_factor)
-            
-            # Volumes
-            call_volume = int(call_oi * np.random.uniform(0.1, 0.3))
-            put_volume = int(put_oi * np.random.uniform(0.1, 0.3))
-            
-            option_data.append({
-                'Strike': float(strike),
-                'Call_OI': call_oi,
-                'Call_IV': call_iv / 100,
-                'Call_LTP': call_ltp,
-                'Call_Volume': call_volume,
-                'Put_OI': put_oi,
-                'Put_IV': put_iv / 100,
-                'Put_LTP': put_ltp,
-                'Put_Volume': put_volume
-            })
-        
-        # Create synthetic response structure
-        today = datetime.now()
-        expiry_dates = [
-            (today + timedelta(days=(4 - today.weekday()))).strftime('%d-%b-%Y'),  # This week
-            (today + timedelta(days=(11 - today.weekday()))).strftime('%d-%b-%Y'),  # Next week
-            (today + timedelta(days=28)).strftime('%d-%b-%Y')  # Monthly
-        ]
-        
-        synthetic_response = {
-            'records': {
-                'expiryDates': expiry_dates,
-                'data': [],
-                'underlyingValue': spot_price
-            }
+        headers = {
+            'User-Agent': user_agent,
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'DNT': '1',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0'
         }
         
-        for opt in option_data:
-            synthetic_response['records']['data'].append({
-                'strikePrice': opt['Strike'],
-                'expiryDate': expiry_dates[0],
-                'CE': {
-                    'openInterest': opt['Call_OI'],
-                    'impliedVolatility': opt['Call_IV'] * 100,
-                    'lastPrice': opt['Call_LTP'],
-                    'totalTradedVolume': opt['Call_Volume']
-                },
-                'PE': {
-                    'openInterest': opt['Put_OI'],
-                    'impliedVolatility': opt['Put_IV'] * 100,
-                    'lastPrice': opt['Put_LTP'],
-                    'totalTradedVolume': opt['Put_Volume']
-                }
-            })
-        
-        return synthetic_response, "Synthetic Data (Demo Mode)"
+        self.session.headers.update(headers)
+        return self.session
     
-    def fetch_nse_option_chain(self, symbol="NIFTY"):
-        """Master fetch with all fallbacks"""
+    def fetch_nse_option_chain(self, symbol="NIFTY", max_retries=5):
+        """Aggressive retry strategy for NSE"""
         
-        errors = []
+        for attempt in range(max_retries):
+            try:
+                session = self.get_session()
+                
+                # Step 1: Get homepage (essential for cookies)
+                session.get('https://www.nseindia.com', timeout=10)
+                time.sleep(1 + attempt * 0.5)  # Progressive delay
+                
+                # Step 2: Get option chain page
+                session.get('https://www.nseindia.com/option-chain', timeout=10)
+                time.sleep(1 + attempt * 0.5)
+                
+                # Step 3: Fetch API
+                url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
+                response = session.get(url, timeout=15)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    # Validate data structure
+                    if 'records' in data and 'data' in data['records']:
+                        return data
+                    else:
+                        raise Exception("Invalid data structure received")
+                
+                elif response.status_code == 403:
+                    if attempt < max_retries - 1:
+                        # Exponential backoff
+                        wait_time = (2 ** attempt) + (attempt * 2)
+                        print(f"Attempt {attempt + 1} failed, waiting {wait_time}s...")
+                        time.sleep(wait_time)
+                        # Reset session
+                        self.session = None
+                        continue
+                    else:
+                        raise Exception(f"NSE blocked after {max_retries} attempts. Professional solution needed.")
+                
+                else:
+                    raise Exception(f"HTTP {response.status_code}")
+                    
+            except requests.exceptions.Timeout:
+                if attempt < max_retries - 1:
+                    wait_time = 3 + (attempt * 2)
+                    print(f"Timeout, retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    self.session = None
+                    continue
+                else:
+                    raise Exception("Connection timeout - NSE may be down or blocking cloud IPs")
+            
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = 2 + (attempt * 1.5)
+                    print(f"Error: {str(e)}, retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    self.session = None
+                    continue
+                else:
+                    raise Exception(f"Failed after {max_retries} attempts: {str(e)}")
         
-        # Try CORS proxy
-        try:
-            data, method = self.fetch_via_cors_proxy(symbol)
-            return data
-        except Exception as e:
-            errors.append(f"CORS Proxy: {str(e)}")
-        
-        # Last resort: Generate synthetic data for testing
-        print("⚠️ WARNING: Using synthetic data (API unavailable)")
-        data, method = self.generate_synthetic_data(symbol)
-        return data
+        raise Exception("All retry attempts exhausted")
     
     def get_futures_ltp_from_multiple_sources(self, symbol="NIFTY"):
-        """Get spot price from multiple sources"""
+        """Fetch spot price"""
         
-        # Try Yahoo Finance
+        # Yahoo Finance
         try:
             symbol_map = {
                 "NIFTY": "^NSEI",
-                "BANKNIFTY": "^NSEBANK"
+                "BANKNIFTY": "^NSEBANK",
+                "FINNIFTY": "NIFTY_FIN_SERVICE.NS",
+                "MIDCPNIFTY": "NIFTY_MIDCAP_50.NS"
             }
             
-            if symbol in symbol_map:
-                yahoo_symbol = symbol_map[symbol]
+            yahoo_symbol = symbol_map.get(symbol)
+            if yahoo_symbol:
                 url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}"
-                
                 response = requests.get(url, timeout=10)
                 data = response.json()
-                
                 price = data['chart']['result'][0]['meta']['regularMarketPrice']
                 return float(price), "Yahoo Finance"
         except:
             pass
         
-        # Try Groww
+        # Groww
         try:
             symbol_map = {
                 "NIFTY": "nifty-50",
-                "BANKNIFTY": "nifty-bank"
+                "BANKNIFTY": "nifty-bank",
+                "FINNIFTY": "nifty-financial-services",
+                "MIDCPNIFTY": "nifty-midcap-50"
             }
             
-            if symbol in symbol_map:
-                groww_symbol = symbol_map[symbol]
+            groww_symbol = symbol_map.get(symbol)
+            if groww_symbol:
                 url = f"https://groww.in/v1/api/charting_service/v2/chart/exchange/NSE/segment/CASH/symbol/{groww_symbol}/latest"
-                
                 response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
                 data = response.json()
-                
                 if 'ltp' in data:
                     return float(data['ltp']), "Groww.in"
         except:
@@ -239,12 +169,12 @@ class EnhancedGEXDEXCalculator:
         return None, None
     
     def fetch_and_calculate_gex_dex(self, symbol="NIFTY", strikes_range=12, expiry_index=0):
-        """Main calculation function"""
+        """Main calculation - PRODUCTION VERSION (No synthetic data)"""
         
-        # Fetch option chain
+        # Fetch real data only
         data = self.fetch_nse_option_chain(symbol)
         
-        # Get spot price
+        # Get futures price
         futures_ltp, fetch_method = self.get_futures_ltp_from_multiple_sources(symbol)
         
         if futures_ltp is None:
@@ -252,17 +182,19 @@ class EnhancedGEXDEXCalculator:
                 futures_ltp = float(data['records']['underlyingValue'])
                 fetch_method = "NSE Underlying"
             except:
-                # Use default
-                defaults = {"NIFTY": 24500, "BANKNIFTY": 52000, "FINNIFTY": 22500, "MIDCPNIFTY": 12000}
-                futures_ltp = defaults.get(symbol, 24500)
-                fetch_method = "Default (APIs unavailable)"
+                raise Exception("Unable to fetch underlying price from any source")
         
         # Get expiry
         expiry_dates = data['records']['expiryDates']
+        if expiry_index >= len(expiry_dates):
+            expiry_index = 0
         selected_expiry = expiry_dates[expiry_index]
         
         # Parse records
         records = data['records']['data']
+        if not records:
+            raise Exception("No option chain data available")
+        
         option_data = []
         
         for record in records:
@@ -295,6 +227,9 @@ class EnhancedGEXDEXCalculator:
                 'Put_Volume': put_volume
             })
         
+        if not option_data:
+            raise Exception(f"No data for expiry {selected_expiry}")
+        
         df = pd.DataFrame(option_data)
         
         # Filter strikes
@@ -302,6 +237,9 @@ class EnhancedGEXDEXCalculator:
             (df['Strike'] >= futures_ltp - strikes_range * 100) &
             (df['Strike'] <= futures_ltp + strikes_range * 100)
         ].copy()
+        
+        if len(df) == 0:
+            raise Exception("No strikes in selected range")
         
         # Time to expiry
         expiry_date = datetime.strptime(selected_expiry, '%d-%b-%Y')
@@ -418,3 +356,8 @@ def detect_gamma_flip_zones(df):
             })
     
     return flip_zones
+```
+
+**Add to requirements.txt:**
+```
+fake-useragent
