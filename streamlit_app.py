@@ -84,7 +84,6 @@ def get_user_tier():
     return "premium" if username in premium_users else "basic"
 
 def get_ist_time():
-    """Get IST time"""
     ist = pytz.timezone('Asia/Kolkata')
     return datetime.now(ist)
 
@@ -125,15 +124,6 @@ st.markdown("""
         border-left: 5px solid #ffc107;
         padding: 1rem;
     }
-    .countdown-timer {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        padding: 0.5rem 1rem;
-        border-radius: 8px;
-        text-align: center;
-        font-size: 1.2rem;
-        font-weight: bold;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -155,6 +145,28 @@ if st.sidebar.button("🚪 Logout"):
     st.rerun()
 
 # ============================================================================
+# DHAN CREDENTIALS - FIXED VERSION
+# ============================================================================
+
+try:
+    # Try to get credentials from secrets
+    if "dhan_client_id" in st.secrets and "dhan_access_token" in st.secrets:
+        DHAN_CLIENT_ID = st.secrets["dhan_client_id"]
+        DHAN_ACCESS_TOKEN = st.secrets["dhan_access_token"]
+        
+        # Debug info in sidebar
+        st.sidebar.success("✅ DhanHQ API Connected")
+        st.sidebar.caption(f"Client ID: {DHAN_CLIENT_ID[:4]}***")
+    else:
+        raise KeyError("Credentials not found")
+        
+except Exception as e:
+    DHAN_CLIENT_ID = None
+    DHAN_ACCESS_TOKEN = None
+    st.sidebar.error("❌ DhanHQ Not Connected")
+    st.sidebar.caption(str(e))
+
+# ============================================================================
 # SIDEBAR
 # ============================================================================
 
@@ -165,49 +177,27 @@ strikes_range = st.sidebar.slider("Strikes Range", 5, 20, 12)
 expiry_index = st.sidebar.selectbox("Expiry", [0, 1, 2], format_func=lambda x: ["Current Weekly", "Next Weekly", "Monthly"][x])
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🔄 Auto-Refresh")
-
-if user_tier == "premium":
-    auto_refresh = st.sidebar.checkbox("Enable Auto-Refresh", value=False)
-    if auto_refresh:
-        refresh_interval = st.sidebar.slider("Interval (seconds)", 30, 300, 60, 30)
-        
-        if 'countdown_start' not in st.session_state:
-            st.session_state.countdown_start = time.time()
-        
-        elapsed = time.time() - st.session_state.countdown_start
-        remaining = max(0, refresh_interval - int(elapsed))
-        
-        countdown_placeholder = st.sidebar.empty()
-        countdown_placeholder.markdown(f'<div class="countdown-timer">⏱️ Next refresh: {remaining}s</div>', unsafe_allow_html=True)
-else:
-    st.sidebar.info("🔒 Auto-refresh: Premium only")
-    auto_refresh = False
-    refresh_interval = 60
 
 if st.sidebar.button("🔄 Refresh Now", use_container_width=True):
     st.cache_data.clear()
-    if 'countdown_start' in st.session_state:
-        st.session_state.countdown_start = time.time()
     st.rerun()
 
 # ============================================================================
 # DATA FETCHING
 # ============================================================================
 
-# Get DhanHQ credentials from Streamlit Secrets
-DHAN_CLIENT_ID = st.secrets.get("dhan_client_id", None)
-DHAN_ACCESS_TOKEN = st.secrets.get("dhan_access_token", None)
-
 @st.cache_data(ttl=60, show_spinner=False)
-def fetch_data(symbol, strikes_range, expiry_index):
+def fetch_data(symbol, strikes_range, expiry_index, client_id, access_token):
     if not CALCULATOR_AVAILABLE:
         return None, None, None, None, f"Calculator not available: {IMPORT_ERROR}"
     
+    if not client_id or not access_token:
+        return None, None, None, None, "DhanHQ credentials not configured in Streamlit Secrets"
+    
     try:
         calculator = EnhancedGEXDEXCalculator(
-            client_id=DHAN_CLIENT_ID,
-            access_token=DHAN_ACCESS_TOKEN
+            client_id=client_id,
+            access_token=access_token
         )
         df, futures_ltp, fetch_method, atm_info = calculator.fetch_and_calculate_gex_dex(
             symbol=symbol,
@@ -225,23 +215,26 @@ def fetch_data(symbol, strikes_range, expiry_index):
 st.markdown("---")
 
 with st.spinner(f"🔄 Fetching {symbol} data from DhanHQ..."):
-    df, futures_ltp, fetch_method, atm_info, error = fetch_data(symbol, strikes_range, expiry_index)
+    df, futures_ltp, fetch_method, atm_info, error = fetch_data(
+        symbol, strikes_range, expiry_index, DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN
+    )
 
 if error:
     st.error(f"❌ Error: {error}")
     
-    if "DhanHQ not initialized" in error:
+    if "not configured" in error or "not initialized" in error:
         st.warning("""
         **DhanHQ API Setup Required:**
         
-        1. Go to Streamlit Cloud → Your App → Settings → Secrets
+        1. Go to: ☰ Menu → Manage app → Settings → Secrets
         2. Add your DhanHQ credentials:
 ```toml
         dhan_client_id = "YOUR_CLIENT_ID"
-        dhan_access_token = "YOUR_ACCESS_TOKEN"
+        dhan_access_token = "YOUR_API_SECRET"
 ```
         
         3. Get credentials from: https://www.dhan.co/ → API Management
+        4. Save and wait 2 minutes for restart
         """)
     
     st.stop()
@@ -295,26 +288,13 @@ try:
             st.markdown(f'<div class="warning-box"><b>GEX:</b> {gex_bias}</div>', unsafe_allow_html=True)
     
     with col2:
-        dex_bias = flow_metrics['dex_near_bias']
-        st.info(f"**DEX Bias:** {dex_bias}")
+        st.info(f"**DEX:** {flow_metrics['dex_near_bias']}")
     
     with col3:
-        combined_bias = flow_metrics['combined_bias']
-        st.info(f"**Combined:** {combined_bias}")
+        st.info(f"**Combined:** {flow_metrics['combined_bias']}")
         
-except Exception as e:
-    flow_metrics = None
-
-# ============================================================================
-# GAMMA FLIP
-# ============================================================================
-
-try:
-    gamma_flip_zones = detect_gamma_flip_zones(df)
-    if gamma_flip_zones:
-        st.warning(f"⚡ **{len(gamma_flip_zones)} Gamma Flip Zone(s) Detected!**")
 except:
-    gamma_flip_zones = []
+    flow_metrics = None
 
 # ============================================================================
 # CHARTS
@@ -322,7 +302,7 @@ except:
 
 st.markdown("---")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 GEX Profile", "📈 DEX Profile", "🎯 Hedging Pressure", "📋 Data", "💡 Strategies"])
+tab1, tab2, tab3 = st.tabs(["📊 GEX Profile", "📈 DEX Profile", "📋 Data"])
 
 with tab1:
     st.subheader(f"{symbol} Gamma Exposure")
@@ -330,16 +310,9 @@ with tab1:
     fig = go.Figure()
     colors = ['green' if x > 0 else 'red' for x in df['Net_GEX_B']]
     
-    fig.add_trace(go.Bar(
-        y=df['Strike'],
-        x=df['Net_GEX_B'],
-        orientation='h',
-        marker_color=colors,
-        name='Net GEX'
-    ))
-    
+    fig.add_trace(go.Bar(y=df['Strike'], x=df['Net_GEX_B'], orientation='h', marker_color=colors))
     fig.add_hline(y=futures_ltp, line_dash="dash", line_color="blue", line_width=3)
-    fig.update_layout(height=600, xaxis_title="Net GEX (Billions)", yaxis_title="Strike")
+    fig.update_layout(height=600, xaxis_title="Net GEX (B)", yaxis_title="Strike")
     
     st.plotly_chart(fig, use_container_width=True)
 
@@ -347,111 +320,31 @@ with tab2:
     st.subheader(f"{symbol} Delta Exposure")
     
     fig2 = go.Figure()
-    dex_colors = ['green' if x > 0 else 'red' for x in df['Net_DEX_B']]
+    colors2 = ['green' if x > 0 else 'red' for x in df['Net_DEX_B']]
     
-    fig2.add_trace(go.Bar(
-        y=df['Strike'],
-        x=df['Net_DEX_B'],
-        orientation='h',
-        marker_color=dex_colors,
-        name='Net DEX'
-    ))
-    
+    fig2.add_trace(go.Bar(y=df['Strike'], x=df['Net_DEX_B'], orientation='h', marker_color=colors2))
     fig2.add_hline(y=futures_ltp, line_dash="dash", line_color="blue", line_width=3)
-    fig2.update_layout(height=600, xaxis_title="Net DEX (Billions)", yaxis_title="Strike")
+    fig2.update_layout(height=600, xaxis_title="Net DEX (B)", yaxis_title="Strike")
     
     st.plotly_chart(fig2, use_container_width=True)
 
 with tab3:
-    st.subheader(f"{symbol} Hedging Pressure")
-    
-    fig3 = go.Figure()
-    
-    fig3.add_trace(go.Bar(
-        y=df['Strike'],
-        x=df['Hedging_Pressure'],
-        orientation='h',
-        marker=dict(color=df['Hedging_Pressure'], colorscale='RdYlGn', showscale=True),
-        name='Hedging Pressure'
-    ))
-    
-    fig3.add_hline(y=futures_ltp, line_dash="dash", line_color="blue", line_width=3)
-    fig3.update_layout(height=600, xaxis_title="Pressure (%)", yaxis_title="Strike")
-    
-    st.plotly_chart(fig3, use_container_width=True)
-
-with tab4:
-    st.subheader("Strike Analysis")
-    
-    display_cols = ['Strike', 'Call_OI', 'Put_OI', 'Net_GEX_B', 'Net_DEX_B', 'Hedging_Pressure']
-    st.dataframe(df[display_cols], use_container_width=True, height=400)
-    
-    csv = df.to_csv(index=False)
-    st.download_button("📥 Download CSV", csv, f"NYZTrade_{symbol}_{get_ist_time().strftime('%Y%m%d')}.csv", "text/csv")
-
-with tab5:
-    st.subheader("💡 Trading Strategies")
-    
-    if flow_metrics and atm_info:
-        gex_val = flow_metrics['gex_near_total']
-        dex_val = flow_metrics['dex_near_total']
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("GEX Flow", f"{gex_val:.2f}")
-        with col2:
-            st.metric("DEX Flow", f"{dex_val:.2f}")
-        
-        st.markdown("---")
-        
-        if gex_val > 50:
-            st.success("### 🟢 Strong Positive GEX")
-            st.text(f"""
-Iron Condor:
-  Sell {symbol} {int(futures_ltp)} CE/PE
-  Buy {symbol} {int(futures_ltp + 200)} CE/{int(futures_ltp - 200)} PE
-Risk: MODERATE
-            """)
-        elif gex_val < -50:
-            st.error("### 🔴 Negative GEX")
-            st.text(f"""
-Long Straddle:
-  Buy {symbol} {atm_info['atm_strike']} CE + PE
-Cost: Rs {atm_info['atm_straddle_premium']:.2f}
-Risk: HIGH
-            """)
-        else:
-            st.warning("### ⚖️ Neutral - Wait for clarity")
+    st.dataframe(df[['Strike', 'Call_OI', 'Put_OI', 'Net_GEX_B', 'Net_DEX_B']], height=400)
 
 # ============================================================================
 # FOOTER
 # ============================================================================
 
 st.markdown("---")
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3 = st.columns(3)
 
 ist_time = get_ist_time()
 
 with col1:
     st.info(f"⏰ {ist_time.strftime('%H:%M:%S')} IST")
 with col2:
-    st.info(f"📅 {ist_time.strftime('%d %b %Y')}")
-with col3:
     st.info(f"📊 {symbol}")
-with col4:
+with col3:
     st.success(f"✅ {fetch_method}")
 
 st.markdown("**💡 NYZTrade YouTube | Powered by DhanHQ**")
-
-# ============================================================================
-# AUTO-REFRESH
-# ============================================================================
-
-if auto_refresh and user_tier == "premium":
-    elapsed = time.time() - st.session_state.countdown_start
-    if elapsed >= refresh_interval:
-        st.session_state.countdown_start = time.time()
-        st.rerun()
-    else:
-        time.sleep(1)
-        st.rerun()
