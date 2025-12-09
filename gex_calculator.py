@@ -27,7 +27,7 @@ class BlackScholesCalculator:
         return delta
 
 class EnhancedGEXDEXCalculator:
-    """GEX/DEX Calculator using DhanHQ API"""
+    """GEX/DEX Calculator using DhanHQ API with API Secret"""
     
     def __init__(self, client_id=None, access_token=None, risk_free_rate=0.07):
         self.risk_free_rate = risk_free_rate
@@ -38,41 +38,42 @@ class EnhancedGEXDEXCalculator:
         
         if client_id and access_token:
             try:
+                # Initialize DhanHQ with Client ID and API Secret
                 self.dhan = dhanhq(client_id, access_token)
+                print(f"✅ DhanHQ initialized successfully for Client: {client_id}")
             except Exception as e:
-                print(f"DhanHQ init warning: {e}")
+                print(f"⚠️ DhanHQ init warning: {e}")
     
     def get_option_chain_from_dhan(self, symbol="NIFTY"):
         """Fetch option chain using DhanHQ"""
         
         if not self.dhan:
-            raise Exception("DhanHQ not initialized. Please add API credentials in Streamlit Secrets.")
+            raise Exception("❌ DhanHQ not initialized. Please add API credentials in Streamlit Secrets.")
         
         try:
             # Security IDs for indices
             security_map = {
-                "NIFTY": 13,
-                "BANKNIFTY": 25,
-                "FINNIFTY": 27,
-                "MIDCPNIFTY": 29
+                "NIFTY": "13",
+                "BANKNIFTY": "25", 
+                "FINNIFTY": "27",
+                "MIDCPNIFTY": "29"
             }
             
-            security_id = security_map.get(symbol, 13)
+            security_id = security_map.get(symbol, "13")
             
-            # Get option chain
-            response = self.dhan.intraday_minute_data(
-                security_id=str(security_id),
-                exchange_segment=dhanhq.IDX,
-                instrument_type=dhanhq.OPTIDX
+            # Get option chain data
+            response = self.dhan.get_option_chain(
+                security_id=security_id,
+                exchange_segment=self.dhan.IDX
             )
             
-            if response['status'] == 'success':
+            if response and 'data' in response:
                 return response['data']
             else:
-                raise Exception(f"DhanHQ API returned: {response.get('remarks', 'Unknown error')}")
+                raise Exception(f"Invalid response from DhanHQ: {response}")
                 
         except Exception as e:
-            raise Exception(f"DhanHQ Error: {str(e)}")
+            raise Exception(f"DhanHQ API Error: {str(e)}")
     
     def get_underlying_price(self, symbol="NIFTY"):
         """Get underlying index price"""
@@ -82,24 +83,24 @@ class EnhancedGEXDEXCalculator:
         
         try:
             security_map = {
-                "NIFTY": 13,
-                "BANKNIFTY": 25,
-                "FINNIFTY": 27,
-                "MIDCPNIFTY": 29
+                "NIFTY": "13",
+                "BANKNIFTY": "25",
+                "FINNIFTY": "27",
+                "MIDCPNIFTY": "29"
             }
             
-            security_id = security_map.get(symbol, 13)
+            security_id = security_map.get(symbol, "13")
             
+            # Get LTP (Last Traded Price)
             response = self.dhan.get_ltp_data(
-                security_id=str(security_id),
-                exchange_segment=dhanhq.IDX,
-                instrument_type=dhanhq.INDEX
+                security_id=security_id,
+                exchange_segment=self.dhan.IDX
             )
             
-            if response['status'] == 'success':
+            if response and 'data' in response and 'LTP' in response['data']:
                 return float(response['data']['LTP'])
             else:
-                raise Exception("Failed to get LTP")
+                raise Exception(f"Failed to get LTP: {response}")
                 
         except Exception as e:
             raise Exception(f"Price fetch error: {str(e)}")
@@ -108,10 +109,10 @@ class EnhancedGEXDEXCalculator:
         """Convert DhanHQ data to our format"""
         
         # Extract unique expiries
-        expiries = sorted(list(set([opt['expiry_date'] for opt in dhan_data if 'expiry_date' in opt])))
+        expiries = sorted(list(set([opt.get('expiry_date', '') for opt in dhan_data if opt.get('expiry_date')])))
         
         if not expiries:
-            raise Exception("No expiry dates found in data")
+            raise Exception("No expiry dates found")
         
         if expiry_index >= len(expiries):
             expiry_index = 0
@@ -144,15 +145,15 @@ class EnhancedGEXDEXCalculator:
             
             opt_type = opt.get('option_type', '').upper()
             
-            if opt_type == 'CALL' or opt_type == 'CE':
+            if 'CALL' in opt_type or opt_type == 'CE':
                 strikes_dict[strike]['Call_OI'] = int(opt.get('open_interest', 0))
-                strikes_dict[strike]['Call_IV'] = float(opt.get('implied_volatility', 15)) / 100
+                strikes_dict[strike]['Call_IV'] = float(opt.get('iv', 15)) / 100
                 strikes_dict[strike]['Call_LTP'] = float(opt.get('ltp', 0))
                 strikes_dict[strike]['Call_Volume'] = int(opt.get('volume', 0))
             
-            elif opt_type == 'PUT' or opt_type == 'PE':
+            elif 'PUT' in opt_type or opt_type == 'PE':
                 strikes_dict[strike]['Put_OI'] = int(opt.get('open_interest', 0))
-                strikes_dict[strike]['Put_IV'] = float(opt.get('implied_volatility', 15)) / 100
+                strikes_dict[strike]['Put_IV'] = float(opt.get('iv', 15)) / 100
                 strikes_dict[strike]['Put_LTP'] = float(opt.get('ltp', 0))
                 strikes_dict[strike]['Put_Volume'] = int(opt.get('volume', 0))
         
@@ -163,9 +164,13 @@ class EnhancedGEXDEXCalculator:
     def fetch_and_calculate_gex_dex(self, symbol="NIFTY", strikes_range=12, expiry_index=0):
         """Main calculation function"""
         
-        # Fetch data from DhanHQ
+        print(f"🔄 Fetching {symbol} data from DhanHQ...")
+        
+        # Fetch data
         dhan_data = self.get_option_chain_from_dhan(symbol)
         underlying_price = self.get_underlying_price(symbol)
+        
+        print(f"✅ Received data | Underlying: {underlying_price}")
         
         # Parse data
         option_data, selected_expiry, expiries = self.parse_dhan_data(
@@ -251,6 +256,8 @@ class EnhancedGEXDEXCalculator:
             'atm_strike': int(atm_strike),
             'atm_straddle_premium': atm_row['Call_LTP'] + atm_row['Put_LTP']
         }
+        
+        print(f"✅ Calculation complete | Strikes: {len(df)} | ATM: {atm_info['atm_strike']}")
         
         return df, underlying_price, "DhanHQ API", atm_info
 
