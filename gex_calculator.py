@@ -1,9 +1,8 @@
 import pandas as pd
 import numpy as np
 from scipy.stats import norm
-import requests
 from datetime import datetime, timedelta
-import time
+from dhanhq import dhanhq
 
 class BlackScholesCalculator:
     @staticmethod
@@ -26,219 +25,167 @@ class BlackScholesCalculator:
         return delta
 
 class EnhancedGEXDEXCalculator:
-    def __init__(self, risk_free_rate=0.07):
+    """GEX/DEX Calculator using DhanHQ API"""
+    
+    def __init__(self, client_id=None, access_token=None, risk_free_rate=0.07):
         self.risk_free_rate = risk_free_rate
         self.bs_calc = BlackScholesCalculator()
-        self.session = None
-    
-    def get_session(self):
-        """Create session with proper headers"""
-        if self.session is None:
-            self.session = requests.Session()
+        self.client_id = client_id
+        self.access_token = access_token
+        self.dhan = None
         
-        user_agents = [
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
-            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-        ]
-        
-        import random
-        user_agent = random.choice(user_agents)
-        
-        headers = {
-            'User-Agent': user_agent,
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'DNT': '1',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Cache-Control': 'max-age=0'
-        }
-        
-        self.session.headers.update(headers)
-        return self.session
-    
-    def fetch_nse_option_chain(self, symbol="NIFTY", max_retries=5):
-        """Fetch with aggressive retry"""
-        
-        for attempt in range(max_retries):
+        if client_id and access_token:
             try:
-                session = self.get_session()
-                
-                # Step 1: Homepage
-                session.get('https://www.nseindia.com', timeout=10)
-                time.sleep(1 + attempt * 0.5)
-                
-                # Step 2: Option chain page
-                session.get('https://www.nseindia.com/option-chain', timeout=10)
-                time.sleep(1 + attempt * 0.5)
-                
-                # Step 3: API call
-                url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-                response = session.get(url, timeout=15)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    if 'records' in data and 'data' in data['records']:
-                        return data
-                    else:
-                        raise Exception("Invalid data structure")
-                
-                elif response.status_code == 403:
-                    if attempt < max_retries - 1:
-                        wait_time = (2 ** attempt) + (attempt * 2)
-                        time.sleep(wait_time)
-                        self.session = None
-                        continue
-                    else:
-                        raise Exception(f"NSE blocked after {max_retries} attempts. Try during market hours or use VPN/self-hosting.")
-                
-                else:
-                    raise Exception(f"HTTP {response.status_code}")
-                    
-            except requests.exceptions.Timeout:
-                if attempt < max_retries - 1:
-                    wait_time = 3 + (attempt * 2)
-                    time.sleep(wait_time)
-                    self.session = None
-                    continue
-                else:
-                    raise Exception("Timeout - NSE may be down or blocking cloud IPs")
-            
+                self.dhan = dhanhq(client_id, access_token)
             except Exception as e:
-                if attempt < max_retries - 1:
-                    wait_time = 2 + (attempt * 1.5)
-                    time.sleep(wait_time)
-                    self.session = None
-                    continue
-                else:
-                    raise Exception(f"Failed after {max_retries} attempts: {str(e)}")
-        
-        raise Exception("All retry attempts exhausted")
+                print(f"Warning: DhanHQ initialization failed: {e}")
     
-    def get_futures_ltp_from_multiple_sources(self, symbol="NIFTY"):
-        """Get spot price from multiple sources"""
+    def get_security_id(self, symbol, segment="IDX_I"):
+        """Get Dhan security ID for index"""
+        security_map = {
+            "NIFTY": "13",      # NIFTY 50
+            "BANKNIFTY": "25",  # BANK NIFTY
+            "FINNIFTY": "27",   # FIN NIFTY
+            "MIDCPNIFTY": "29"  # MIDCP NIFTY
+        }
+        return security_map.get(symbol, "13")
+    
+    def fetch_option_chain_dhan(self, symbol="NIFTY"):
+        """Fetch option chain using DhanHQ API"""
         
-        # Yahoo Finance
+        if not self.dhan:
+            raise Exception("DhanHQ not initialized. Please provide Client ID and Access Token.")
+        
         try:
-            symbol_map = {
-                "NIFTY": "^NSEI",
-                "BANKNIFTY": "^NSEBANK",
-                "FINNIFTY": "NIFTY_FIN_SERVICE.NS",
-                "MIDCPNIFTY": "NIFTY_MIDCAP_50.NS"
-            }
+            # Get security ID
+            security_id = self.get_security_id(symbol)
             
-            yahoo_symbol = symbol_map.get(symbol)
-            if yahoo_symbol:
-                url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}"
-                response = requests.get(url, timeout=10)
-                data = response.json()
-                price = data['chart']['result'][0]['meta']['regularMarketPrice']
-                return float(price), "Yahoo Finance"
-        except:
-            pass
+            # Get LTP for underlying
+            ltp_response = self.dhan.get_ltp_data(
+                exchange_segment=dhanhq.IDX,
+                security_id=security_id
+            )
+            
+            if ltp_response['status'] == 'success':
+                underlying_price = ltp_response['data']['LTP']
+            else:
+                raise Exception("Failed to fetch underlying price")
+            
+            # Get option chain
+            # Note: DhanHQ provides expiry-wise option data
+            option_chain_response = self.dhan.get_option_chain(
+                exchange_segment=dhanhq.IDX,
+                security_id=security_id
+            )
+            
+            if option_chain_response['status'] != 'success':
+                raise Exception("Failed to fetch option chain")
+            
+            return option_chain_response['data'], underlying_price, "DhanHQ API"
+            
+        except Exception as e:
+            raise Exception(f"DhanHQ API Error: {str(e)}")
+    
+    def fetch_option_chain_marketdata(self, symbol="NIFTY"):
+        """Fetch using DhanHQ Market Data Feed (Free - no login required)"""
         
-        # Groww
         try:
-            symbol_map = {
-                "NIFTY": "nifty-50",
-                "BANKNIFTY": "nifty-bank",
-                "FINNIFTY": "nifty-financial-services",
-                "MIDCPNIFTY": "nifty-midcap-50"
-            }
+            # DhanHQ provides free market data feed
+            # This doesn't require authentication
+            from dhanhq import marketfeed
             
-            groww_symbol = symbol_map.get(symbol)
-            if groww_symbol:
-                url = f"https://groww.in/v1/api/charting_service/v2/chart/exchange/NSE/segment/CASH/symbol/{groww_symbol}/latest"
-                response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
-                data = response.json()
-                if 'ltp' in data:
-                    return float(data['ltp']), "Groww.in"
-        except:
-            pass
+            # Get instrument list
+            instruments = marketfeed.get_option_chain(symbol)
+            
+            # Get LTP for underlying
+            underlying_ltp = marketfeed.get_ltp(symbol)
+            
+            return instruments, underlying_ltp, "DhanHQ Market Feed"
+            
+        except Exception as e:
+            raise Exception(f"Market Feed Error: {str(e)}")
+    
+    def parse_dhan_option_data(self, dhan_data, underlying_price, expiry_index=0):
+        """Convert DhanHQ data to our format"""
         
-        return None, None
+        # Get unique expiries
+        expiries = sorted(list(set([opt['expiry_date'] for opt in dhan_data])))
+        
+        if expiry_index >= len(expiries):
+            expiry_index = 0
+        
+        selected_expiry = expiries[expiry_index]
+        
+        # Filter by expiry
+        expiry_data = [opt for opt in dhan_data if opt['expiry_date'] == selected_expiry]
+        
+        # Group by strike
+        strikes_data = {}
+        
+        for opt in expiry_data:
+            strike = opt['strike_price']
+            
+            if strike not in strikes_data:
+                strikes_data[strike] = {
+                    'Strike': strike,
+                    'Call_OI': 0,
+                    'Call_IV': 0,
+                    'Call_LTP': 0,
+                    'Call_Volume': 0,
+                    'Put_OI': 0,
+                    'Put_IV': 0,
+                    'Put_LTP': 0,
+                    'Put_Volume': 0
+                }
+            
+            if opt['option_type'] == 'CALL':
+                strikes_data[strike]['Call_OI'] = opt.get('open_interest', 0)
+                strikes_data[strike]['Call_IV'] = opt.get('implied_volatility', 15) / 100
+                strikes_data[strike]['Call_LTP'] = opt.get('ltp', 0)
+                strikes_data[strike]['Call_Volume'] = opt.get('volume', 0)
+            
+            elif opt['option_type'] == 'PUT':
+                strikes_data[strike]['Put_OI'] = opt.get('open_interest', 0)
+                strikes_data[strike]['Put_IV'] = opt.get('implied_volatility', 15) / 100
+                strikes_data[strike]['Put_LTP'] = opt.get('ltp', 0)
+                strikes_data[strike]['Put_Volume'] = opt.get('volume', 0)
+        
+        option_data = list(strikes_data.values())
+        
+        return option_data, selected_expiry, expiries
     
     def fetch_and_calculate_gex_dex(self, symbol="NIFTY", strikes_range=12, expiry_index=0):
-        """Main calculation function"""
+        """Main calculation using DhanHQ"""
         
-        # Fetch data
-        data = self.fetch_nse_option_chain(symbol)
+        # Try authenticated API first, then fall back to market feed
+        try:
+            if self.dhan:
+                dhan_data, underlying_price, fetch_method = self.fetch_option_chain_dhan(symbol)
+            else:
+                dhan_data, underlying_price, fetch_method = self.fetch_option_chain_marketdata(symbol)
+        except Exception as e:
+            raise Exception(f"Failed to fetch data from DhanHQ: {str(e)}")
         
-        # Get futures price
-        futures_ltp, fetch_method = self.get_futures_ltp_from_multiple_sources(symbol)
-        
-        if futures_ltp is None:
-            try:
-                futures_ltp = float(data['records']['underlyingValue'])
-                fetch_method = "NSE Underlying"
-            except:
-                raise Exception("Unable to fetch underlying price")
-        
-        # Get expiry
-        expiry_dates = data['records']['expiryDates']
-        if expiry_index >= len(expiry_dates):
-            expiry_index = 0
-        selected_expiry = expiry_dates[expiry_index]
-        
-        # Parse records
-        records = data['records']['data']
-        if not records:
-            raise Exception("No option chain data available")
-        
-        option_data = []
-        
-        for record in records:
-            if record.get('expiryDate') != selected_expiry:
-                continue
-            
-            strike = record['strikePrice']
-            
-            ce_data = record.get('CE', {})
-            call_oi = ce_data.get('openInterest', 0)
-            call_iv = ce_data.get('impliedVolatility', 0) / 100
-            call_ltp = ce_data.get('lastPrice', 0)
-            call_volume = ce_data.get('totalTradedVolume', 0)
-            
-            pe_data = record.get('PE', {})
-            put_oi = pe_data.get('openInterest', 0)
-            put_iv = pe_data.get('impliedVolatility', 0) / 100
-            put_ltp = pe_data.get('lastPrice', 0)
-            put_volume = pe_data.get('totalTradedVolume', 0)
-            
-            option_data.append({
-                'Strike': strike,
-                'Call_OI': call_oi,
-                'Call_IV': call_iv,
-                'Call_LTP': call_ltp,
-                'Call_Volume': call_volume,
-                'Put_OI': put_oi,
-                'Put_IV': put_iv,
-                'Put_LTP': put_ltp,
-                'Put_Volume': put_volume
-            })
+        # Parse data
+        option_data, selected_expiry, expiries = self.parse_dhan_option_data(
+            dhan_data, underlying_price, expiry_index
+        )
         
         if not option_data:
-            raise Exception(f"No data for expiry {selected_expiry}")
+            raise Exception("No option data available")
         
         df = pd.DataFrame(option_data)
         
-        # Filter strikes
+        # Filter strikes around current price
         df = df[
-            (df['Strike'] >= futures_ltp - strikes_range * 100) &
-            (df['Strike'] <= futures_ltp + strikes_range * 100)
+            (df['Strike'] >= underlying_price - strikes_range * 100) &
+            (df['Strike'] <= underlying_price + strikes_range * 100)
         ].copy()
         
         if len(df) == 0:
-            raise Exception("No strikes in range")
+            raise Exception("No strikes in selected range")
         
-        # Time to expiry
+        # Calculate time to expiry
         expiry_date = datetime.strptime(selected_expiry, '%d-%b-%Y')
         days_to_expiry = max((expiry_date - datetime.now()).days, 1)
         T = days_to_expiry / 365.0
@@ -246,40 +193,40 @@ class EnhancedGEXDEXCalculator:
         # Calculate Greeks
         df['Call_Gamma'] = df.apply(
             lambda row: self.bs_calc.calculate_gamma(
-                futures_ltp, row['Strike'], T, self.risk_free_rate, max(row['Call_IV'], 0.01)
+                underlying_price, row['Strike'], T, self.risk_free_rate, max(row['Call_IV'], 0.01)
             ), axis=1
         )
         
         df['Put_Gamma'] = df.apply(
             lambda row: self.bs_calc.calculate_gamma(
-                futures_ltp, row['Strike'], T, self.risk_free_rate, max(row['Put_IV'], 0.01)
+                underlying_price, row['Strike'], T, self.risk_free_rate, max(row['Put_IV'], 0.01)
             ), axis=1
         )
         
         df['Call_Delta'] = df.apply(
             lambda row: self.bs_calc.calculate_delta(
-                futures_ltp, row['Strike'], T, self.risk_free_rate, max(row['Call_IV'], 0.01), 'call'
+                underlying_price, row['Strike'], T, self.risk_free_rate, max(row['Call_IV'], 0.01), 'call'
             ), axis=1
         )
         
         df['Put_Delta'] = df.apply(
             lambda row: self.bs_calc.calculate_delta(
-                futures_ltp, row['Strike'], T, self.risk_free_rate, max(row['Put_IV'], 0.01), 'put'
+                underlying_price, row['Strike'], T, self.risk_free_rate, max(row['Put_IV'], 0.01), 'put'
             ), axis=1
         )
         
-        # GEX and DEX
-        df['Call_GEX'] = df['Call_Gamma'] * df['Call_OI'] * futures_ltp * futures_ltp * 0.01
-        df['Put_GEX'] = df['Put_Gamma'] * df['Put_OI'] * futures_ltp * futures_ltp * 0.01 * -1
+        # Calculate GEX and DEX
+        df['Call_GEX'] = df['Call_Gamma'] * df['Call_OI'] * underlying_price * underlying_price * 0.01
+        df['Put_GEX'] = df['Put_Gamma'] * df['Put_OI'] * underlying_price * underlying_price * 0.01 * -1
         df['Net_GEX'] = df['Call_GEX'] + df['Put_GEX']
         df['Net_GEX_B'] = df['Net_GEX'] / 1e9
         
-        df['Call_DEX'] = df['Call_Delta'] * df['Call_OI'] * futures_ltp * 0.01
-        df['Put_DEX'] = df['Put_Delta'] * df['Put_OI'] * futures_ltp * 0.01
+        df['Call_DEX'] = df['Call_Delta'] * df['Call_OI'] * underlying_price * 0.01
+        df['Put_DEX'] = df['Put_Delta'] * df['Put_OI'] * underlying_price * 0.01
         df['Net_DEX'] = df['Call_DEX'] + df['Put_DEX']
         df['Net_DEX_B'] = df['Net_DEX'] / 1e9
         
-        # Hedging pressure
+        # Calculate hedging pressure
         total_gex = df['Net_GEX'].abs().sum()
         if total_gex > 0:
             df['Hedging_Pressure'] = (df['Net_GEX'] / total_gex) * 100
@@ -289,7 +236,7 @@ class EnhancedGEXDEXCalculator:
         df['Total_Volume'] = df['Call_Volume'] + df['Put_Volume']
         
         # ATM info
-        atm_strike = df.iloc[(df['Strike'] - futures_ltp).abs().argsort()[0]]['Strike']
+        atm_strike = df.iloc[(df['Strike'] - underlying_price).abs().argsort()[0]]['Strike']
         atm_row = df[df['Strike'] == atm_strike].iloc[0]
         
         atm_info = {
@@ -297,7 +244,7 @@ class EnhancedGEXDEXCalculator:
             'atm_straddle_premium': atm_row['Call_LTP'] + atm_row['Put_LTP']
         }
         
-        return df, futures_ltp, fetch_method, atm_info
+        return df, underlying_price, fetch_method, atm_info
 
 def calculate_dual_gex_dex_flow(df, futures_ltp):
     df_sorted = df.sort_values('Strike').copy()
